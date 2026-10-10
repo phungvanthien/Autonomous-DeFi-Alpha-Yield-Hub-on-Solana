@@ -10,6 +10,9 @@ interface SolanaWalletProviderValue {
   isConnected: boolean;
   isConnecting: boolean;
   balance: number;
+  network: "mainnet" | "devnet";
+  setNetwork: (network: "mainnet" | "devnet") => void;
+  devnetBalance?: number;
   connect: (walletType?: "phantom" | "solflare" | "backpack") => Promise<boolean>;
   disconnect: () => void;
   refreshBalance: () => Promise<void>;
@@ -28,6 +31,8 @@ const WalletContext = createContext<SolanaWalletProviderValue>({
   isConnected: false,
   isConnecting: false,
   balance: 0,
+  network: "mainnet",
+  setNetwork: () => {},
   connect: async () => false,
   disconnect: () => {},
   refreshBalance: async () => {},
@@ -38,20 +43,36 @@ const WalletContext = createContext<SolanaWalletProviderValue>({
 
 export const useSolanaWallet = () => useContext(WalletContext);
 
-// RPC Connection dự phòng
-const RPC_ENDPOINT = process.env.NEXT_PUBLIC_SOLANA_RPC || "https://api.mainnet-beta.solana.com";
-
 export function SolanaWalletProvider({ children }: { children: React.ReactNode }) {
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [walletName, setWalletName] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [balance, setBalance] = useState<number>(0);
+  const [network, setNetworkState] = useState<"mainnet" | "devnet">("mainnet");
+  const [devnetBalance, setDevnetBalance] = useState<number | undefined>(undefined);
   const [installedWallets, setInstalledWallets] = useState({
     phantom: false,
     solflare: false,
     backpack: false,
   });
+
+  const setNetwork = useCallback((net: "mainnet" | "devnet") => {
+    setNetworkState(net);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("solana_cluster_network", net);
+    }
+  }, []);
+
+  // Đọc mạng đã lưu lúc khởi tạo
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("solana_cluster_network");
+      if (saved === "devnet" || saved === "mainnet") {
+        setNetworkState(saved);
+      }
+    }
+  }, []);
 
   const getProvider = (type?: "phantom" | "solflare" | "backpack") => {
     if (typeof window === "undefined") return null;
@@ -114,26 +135,63 @@ export function SolanaWalletProvider({ children }: { children: React.ReactNode }
     return () => clearTimeout(timer);
   }, []);
 
-  // Lấy số dư SOL của ví chính
+  // Lấy số dư SOL của ví chính với cơ chế fallback đa tầng
   const refreshBalance = useCallback(async () => {
     if (!walletAddress) return;
     try {
-      const conn = new Connection(RPC_ENDPOINT, "confirmed");
-      const pubKey = new PublicKey(walletAddress);
-      const lamports = await conn.getBalance(pubKey);
-      setBalance(Number((lamports / LAMPORTS_PER_SOL).toFixed(4)));
-    } catch (err) {
-      console.warn("Lỗi cập nhật số dư ví chính:", err);
+      // 1. Gọi server-side API trước (ưu tiên tối cao vì có API Key Helius/Flux và không bị chặn CORS)
+      const res = await fetch(
+        `/api/wallet/balance?address=${encodeURIComponent(walletAddress)}&network=${network}`,
+        { cache: "no-store" }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && typeof data.balance === "number") {
+          setBalance(data.balance);
+          if (typeof data.devnetBalance === "number") {
+            setDevnetBalance(data.devnetBalance);
+          } else {
+            setDevnetBalance(undefined);
+          }
+          return;
+        }
+      }
+    } catch {
+      // Tiếp tục fallback trực tiếp qua client RPC bên dưới
     }
-  }, [walletAddress]);
+
+    // 2. Fallback trực tiếp qua danh sách RPC công khai ở browser
+    const clientEndpoints =
+      network === "devnet"
+        ? ["https://api.devnet.solana.com"]
+        : [
+            process.env.NEXT_PUBLIC_SOLANA_RPC,
+            "https://solana-rpc.publicnode.com",
+            "https://rpc.ankr.com/solana",
+            "https://api.mainnet-beta.solana.com",
+          ].filter(Boolean) as string[];
+
+    for (const url of clientEndpoints) {
+      try {
+        const conn = new Connection(url, "confirmed");
+        const pubKey = new PublicKey(walletAddress);
+        const lamports = await conn.getBalance(pubKey);
+        setBalance(Number((lamports / LAMPORTS_PER_SOL).toFixed(4)));
+        return;
+      } catch {
+        continue;
+      }
+    }
+  }, [walletAddress, network]);
 
   useEffect(() => {
     if (walletAddress) {
       refreshBalance();
-      const interval = setInterval(refreshBalance, 20000);
+      const interval = setInterval(refreshBalance, 15000);
       return () => clearInterval(interval);
     } else {
       setBalance(0);
+      setDevnetBalance(undefined);
     }
   }, [walletAddress, refreshBalance]);
 
@@ -158,6 +216,10 @@ export function SolanaWalletProvider({ children }: { children: React.ReactNode }
         setIsConnected(true);
         localStorage.setItem("solana_connected_wallet", name);
         setIsConnecting(false);
+        // Ngay lập tức kích hoạt lấy số dư
+        setTimeout(() => {
+          refreshBalance();
+        }, 100);
         return true;
       }
     } catch (error: any) {
@@ -213,7 +275,7 @@ export function SolanaWalletProvider({ children }: { children: React.ReactNode }
       const provider = getProvider(walletName as any);
       if (!provider) throw new Error("Wallet provider not found");
 
-      const conn = getSafeConnection();
+      const conn = getSafeConnection(network);
       const fromPubkey = new PublicKey(walletAddress);
       const toPubkey = new PublicKey(subWalletAddress);
       const lamports = Math.round(amountSol * LAMPORTS_PER_SOL);
@@ -299,6 +361,9 @@ export function SolanaWalletProvider({ children }: { children: React.ReactNode }
         isConnected,
         isConnecting,
         balance,
+        network,
+        setNetwork,
+        devnetBalance,
         connect,
         disconnect,
         refreshBalance,

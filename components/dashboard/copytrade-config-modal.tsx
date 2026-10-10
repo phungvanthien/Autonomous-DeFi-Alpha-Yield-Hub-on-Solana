@@ -58,7 +58,7 @@ export function CopyTradeConfigModal({
     if (subWalletBalance < config.maxSolPerTrade) {
       if (onOpenDepositModal) {
         const wantDeposit = confirm(
-          `Số dư Sub-Wallet (${subWalletBalance.toFixed(3)} SOL) thấp hơn khối lượng giao dịch (${config.maxSolPerTrade} SOL).\nBạn có muốn nạp thêm SOL vào Sub-Wallet ngay bây giờ không?`
+          `Sub-Wallet balance (${subWalletBalance.toFixed(3)} SOL) is lower than trade volume (${config.maxSolPerTrade} SOL).\nWould you like to deposit more SOL into Sub-Wallet now?`
         );
         if (wantDeposit) {
           onOpenDepositModal(Number((config.maxSolPerTrade - subWalletBalance + 0.1).toFixed(2)));

@@ -20,7 +20,7 @@ export const METEORA_DLMM_PROGRAM_ID = new PublicKey(
   "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"
 );
 
-const RPC_ENDPOINT = process.env.NEXT_PUBLIC_SOLANA_RPC || "https://api.mainnet-beta.solana.com";
+const RPC_ENDPOINT = process.env.NEXT_PUBLIC_SOLANA_RPC || "https://solana-rpc.publicnode.com";
 
 export interface DlmmBinConfig {
   binStep: number;

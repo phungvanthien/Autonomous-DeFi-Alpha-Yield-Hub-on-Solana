@@ -59,7 +59,7 @@ interface NavbarProps {
 
 export function Navbar({ onOpenAgent }: NavbarProps) {
   const pathname = usePathname();
-  const { walletAddress, isConnected, balance } = useSolanaWallet();
+  const { walletAddress, isConnected, balance, network, setNetwork } = useSolanaWallet();
   const [subWalletBalance, setSubWalletBalance] = useState<number>(0);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -67,7 +67,7 @@ export function Navbar({ onOpenAgent }: NavbarProps) {
     if (walletAddress) {
       const sw = getSubWallet(walletAddress);
       if (sw) {
-        fetchSubWalletBalance(sw.publicKey, walletAddress).then(setSubWalletBalance);
+        fetchSubWalletBalance(sw.publicKey, walletAddress, network).then(setSubWalletBalance);
       }
     } else {
       setSubWalletBalance(0);
@@ -89,7 +89,7 @@ export function Navbar({ onOpenAgent }: NavbarProps) {
     return () => {
       window.removeEventListener("solana_subwallet_balance_updated", handleSubBalanceUpdate);
     };
-  }, [walletAddress]);
+  }, [walletAddress, network]);
 
   return (
     <header className="sticky top-0 z-40 w-full border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur-md">
@@ -183,10 +183,19 @@ export function Navbar({ onOpenAgent }: NavbarProps) {
             )}
 
             {/* Network Badge */}
-            <span className="hidden xl:flex text-[11px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2.5 py-1 rounded-xl font-mono items-center gap-1.5">
-              <span className="size-1.5 rounded-full bg-emerald-400" />
-              Mainnet
-            </span>
+            <button
+              type="button"
+              onClick={() => setNetwork(network === "mainnet" ? "devnet" : "mainnet")}
+              className={`hidden xl:flex text-[11px] ${
+                network === "mainnet"
+                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20"
+                  : "bg-purple-500/10 text-purple-300 border-purple-500/30 hover:bg-purple-500/20"
+              } border px-2.5 py-1 rounded-xl font-mono items-center gap-1.5 cursor-pointer transition-colors`}
+              title="Click to toggle between Solana Mainnet and Devnet"
+            >
+              <span className={`size-1.5 rounded-full ${network === "mainnet" ? "bg-emerald-400" : "bg-purple-400"}`} />
+              <span className="capitalize">{network}</span>
+            </button>
 
             {/* Wallet Connect Button */}
             <WalletConnectButton />

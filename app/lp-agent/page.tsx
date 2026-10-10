@@ -21,12 +21,14 @@ import {
   recordSubWalletDeduction,
   recordSubWalletDeposit,
 } from "@/lib/sub-wallet-manager";
+import { fetchLiveSolPrice } from "@/lib/token-price-service";
 import { PoolDiscoveryTable } from "@/components/lp-agent/pool-discovery-table";
 import { DeployLpModal } from "@/components/lp-agent/deploy-lp-modal";
 import { ActivePositionsGrid } from "@/components/lp-agent/active-positions-grid";
 import { IlCalculatorModal } from "@/components/lp-agent/il-calculator-modal";
 import { AutonomousWatcherPanel } from "@/components/lp-agent/autonomous-watcher-panel";
 import { DepositSubWalletModal } from "@/components/wallet/deposit-subwallet-modal";
+import { WithdrawSubWalletModal } from "@/components/wallet/withdraw-subwallet-modal";
 import {
   Layers,
   Coins,
@@ -40,6 +42,7 @@ import {
   Sliders,
   DollarSign,
   ArrowRight,
+  ArrowUpRight,
   Search,
   Lock,
   Calculator,
@@ -49,7 +52,7 @@ import {
 } from "lucide-react";
 
 export default function LpAgentPage() {
-  const { walletAddress, isConnected } = useSolanaWallet();
+  const { walletAddress, isConnected, network } = useSolanaWallet();
   const [subWalletBalance, setSubWalletBalance] = useState<number>(0);
   const [activeTab, setActiveTab] = useState<"EXPLORER" | "POSITIONS" | "WATCHER" | "SETTINGS">("EXPLORER");
 
@@ -66,10 +69,11 @@ export default function LpAgentPage() {
   const [selectedPoolForDeploy, setSelectedPoolForDeploy] = useState<LpPoolData | null>(null);
   const [selectedPoolForCalculator, setSelectedPoolForCalculator] = useState<LpPoolData | null>(null);
 
-  // Deposit Modal State
+  // Deposit & Withdraw Modal State
   const [isDepositOpen, setIsDepositOpen] = useState(false);
-  const [depositTargetDesc, setDepositTargetDesc] = useState<string>("Cấp vốn triển khai LP Agent");
+  const [depositTargetDesc, setDepositTargetDesc] = useState<string>("Fund LP Agent Deployment");
   const [depositRecommendedAmt, setDepositRecommendedAmt] = useState<number>(0.5);
+  const [isWithdrawOpen, setIsWithdrawOpen] = useState(false);
 
   const fetchLivePools = useCallback(async () => {
     setIsLoadingPools(true);
@@ -101,12 +105,12 @@ export default function LpAgentPage() {
     if (walletAddress) {
       const sw = getSubWallet(walletAddress);
       if (sw) {
-        fetchSubWalletBalance(sw.publicKey, walletAddress).then(setSubWalletBalance);
+        fetchSubWalletBalance(sw.publicKey, walletAddress, network).then(setSubWalletBalance);
       }
     } else {
       setSubWalletBalance(0);
     }
-  }, [walletAddress]);
+  }, [walletAddress, network]);
 
   useEffect(() => {
     refreshSubBalance();
@@ -136,13 +140,14 @@ export default function LpAgentPage() {
     setTimeout(() => setToastNotification(null), 4500);
   };
 
-  const handleDeployConfirm = (pool: LpPoolData, config: LpAgentConfig) => {
+  const handleDeployConfirm = async (pool: LpPoolData, config: LpAgentConfig) => {
     // Khấu trừ vốn từ Sub-Wallet tương ứng
     if (walletAddress && config.allocatedSol > 0) {
       recordSubWalletDeduction(walletAddress, config.allocatedSol);
     }
 
-    const newPos = deployLpPosition(pool, config);
+    const solPrice = await fetchLiveSolPrice();
+    const newPos = deployLpPosition(pool, config, solPrice);
     refreshPositions();
     showToast(`Successfully deployed LP Agent for ${newPos.tokenPair} (${config.allocatedSol} SOL)`);
     setSelectedPoolForDeploy(null);
@@ -237,14 +242,23 @@ export default function LpAgentPage() {
           </div>
           <button
             onClick={() => {
-              setDepositTargetDesc("Cấp vốn ủy thác cho LP Agent Harvester");
+              setDepositTargetDesc("Fund delegation for LP Agent Harvester");
               setDepositRecommendedAmt(0.5);
               setIsDepositOpen(true);
             }}
             className="flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-gradient-to-r from-purple-500 to-indigo-500 hover:from-purple-400 hover:to-indigo-400 text-white font-extrabold text-xs shadow-md shadow-purple-500/20 transition-all cursor-pointer"
           >
             <Coins className="size-3.5" />
-            <span>Nạp SOL vào Sub-Wallet</span>
+            <span>Deposit SOL</span>
+          </button>
+          <button
+            onClick={() => setIsWithdrawOpen(true)}
+            disabled={subWalletBalance <= 0.005}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 font-extrabold text-xs transition-all cursor-pointer disabled:opacity-50"
+            title="Withdraw capital from Sub-Wallet back to primary wallet"
+          >
+            <ArrowUpRight className="size-3.5 text-blue-400" />
+            <span>Withdraw Funds</span>
           </button>
         </div>
       </div>
@@ -440,7 +454,7 @@ export default function LpAgentPage() {
           subWalletBalance={subWalletBalance}
           onDeploy={handleDeployConfirm}
           onOpenDepositModal={(amt) => {
-            setDepositTargetDesc(`Cấp vốn ${amt} SOL mở vị thế LP ${selectedPoolForDeploy.tokenA.symbol}/${selectedPoolForDeploy.tokenB.symbol}`);
+            setDepositTargetDesc(`Fund ${amt} SOL to open LP position for ${selectedPoolForDeploy.tokenA.symbol}/${selectedPoolForDeploy.tokenB.symbol}`);
             setDepositRecommendedAmt(amt);
             setIsDepositOpen(true);
           }}
@@ -465,7 +479,17 @@ export default function LpAgentPage() {
         recommendedAmount={depositRecommendedAmt}
         onSuccess={(newBal) => {
           setSubWalletBalance(newBal);
-          showToast(`Đã nạp thành công! Số dư Sub-Wallet hiện tại: ${newBal.toFixed(3)} SOL`);
+          showToast(`Deposit successful! Current Sub-Wallet balance: ${newBal.toFixed(3)} SOL`);
+        }}
+      />
+
+      {/* WITHDRAW MODAL */}
+      <WithdrawSubWalletModal
+        isOpen={isWithdrawOpen}
+        onClose={() => setIsWithdrawOpen(false)}
+        onSuccess={(newBal) => {
+          setSubWalletBalance(newBal);
+          showToast(`Withdrawal successful! Remaining Sub-Wallet balance: ${newBal.toFixed(3)} SOL`);
         }}
       />
     </div>

@@ -100,14 +100,14 @@ export function DeployLpModal({
     if (allocatedSol > subWalletBalance) {
       if (onOpenDepositModal) {
         const wantDeposit = confirm(
-          `Số dư Sub-Wallet (${subWalletBalance.toFixed(3)} SOL) không đủ để cấp vốn ${allocatedSol} SOL.\nBạn có muốn nạp thêm SOL vào Sub-Wallet ngay không?`
+          `Sub-Wallet balance (${subWalletBalance.toFixed(3)} SOL) is insufficient to fund ${allocatedSol} SOL.\nWould you like to deposit more SOL into Sub-Wallet now?`
         );
         if (wantDeposit) {
           onOpenDepositModal(Number((allocatedSol - subWalletBalance + 0.1).toFixed(2)));
           return;
         }
       }
-      setErrorMsg(`Số dư Sub-Wallet (${subWalletBalance.toFixed(3)} SOL) không đủ để cấp vốn ${allocatedSol} SOL. Vui lòng nạp thêm.`);
+      setErrorMsg(`Sub-Wallet balance (${subWalletBalance.toFixed(3)} SOL) is insufficient to fund ${allocatedSol} SOL. Please deposit more.`);
       return;
     }
 

@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { WhaleDiscoveryPanel } from "@/components/dashboard/whale-discovery-panel";
 import { CopyTradeConfigModal } from "@/components/dashboard/copytrade-config-modal";
 import { DepositSubWalletModal } from "@/components/wallet/deposit-subwallet-modal";
+import { WithdrawSubWalletModal } from "@/components/wallet/withdraw-subwallet-modal";
 import { useSolanaWallet } from "@/components/wallet/wallet-context";
 import { getSubWallet, fetchSubWalletBalance, recordSubWalletDeduction } from "@/lib/sub-wallet-manager";
 import { executeSubWalletBuyToken, executeSubWalletSellToken } from "@/lib/jupiter-swap-router";
@@ -28,10 +29,11 @@ import {
   Filter,
   PlusCircle,
   Coins,
+  ArrowUpRight,
 } from "lucide-react";
 
 export default function CopyTradePage() {
-  const { walletAddress, isConnected } = useSolanaWallet();
+  const { walletAddress, isConnected, network } = useSolanaWallet();
   const [subWalletBalance, setSubWalletBalance] = useState<number>(0);
   const [selectedWhaleForConfig, setSelectedWhaleForConfig] = useState<{
     address: string;
@@ -43,16 +45,17 @@ export default function CopyTradePage() {
   const [positions, setPositions] = useState<CopyTradePosition[]>([]);
   const [toastNotification, setToastNotification] = useState<string | null>(null);
 
-  // Deposit modal state
+  // Deposit & Withdraw modal state
   const [isDepositOpen, setIsDepositOpen] = useState(false);
-  const [depositTargetDesc, setDepositTargetDesc] = useState<string>("Uỷ thác giao dịch Copy-Trade cá voi");
+  const [depositTargetDesc, setDepositTargetDesc] = useState<string>("Whale Copy-Trade Delegation");
   const [depositRecommendedAmt, setDepositRecommendedAmt] = useState<number>(0.3);
+  const [isWithdrawOpen, setIsWithdrawOpen] = useState(false);
 
   const refreshBalance = () => {
     if (walletAddress) {
       const sw = getSubWallet(walletAddress);
       if (sw) {
-        fetchSubWalletBalance(sw.publicKey, walletAddress).then(setSubWalletBalance);
+        fetchSubWalletBalance(sw.publicKey, walletAddress, network).then(setSubWalletBalance);
       }
     } else {
       setSubWalletBalance(0);
@@ -80,7 +83,7 @@ export default function CopyTradePage() {
       window.removeEventListener("solana_copytrade_positions_updated", handlePositionsUpdate);
       window.removeEventListener("solana_subwallet_balance_updated", handleSubBalanceUpdate);
     };
-  }, [walletAddress]);
+  }, [walletAddress, network]);
 
   const handleOpenConfigModal = (whale: {
     address: string;
@@ -248,14 +251,23 @@ export default function CopyTradePage() {
           </div>
           <button
             onClick={() => {
-              setDepositTargetDesc("Uỷ thác sao chép lệnh cá voi");
+              setDepositTargetDesc("Whale Copy-Trade Delegation");
               setDepositRecommendedAmt(0.3);
               setIsDepositOpen(true);
             }}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-black font-extrabold text-xs shadow-md shadow-amber-500/20 transition-all cursor-pointer"
           >
             <Coins className="size-3.5" />
-            <span>Nạp SOL vào Sub-Wallet</span>
+            <span>Deposit SOL</span>
+          </button>
+          <button
+            onClick={() => setIsWithdrawOpen(true)}
+            disabled={subWalletBalance <= 0.005}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 font-bold text-xs transition-all cursor-pointer disabled:opacity-50"
+            title="Withdraw capital from Sub-Wallet back to primary wallet"
+          >
+            <ArrowUpRight className="size-3.5 text-blue-400" />
+            <span>Withdraw Funds</span>
           </button>
         </div>
       </div>
@@ -366,7 +378,7 @@ export default function CopyTradePage() {
           subWalletBalance={subWalletBalance}
           onActivated={handleConfigActivated}
           onOpenDepositModal={(amt) => {
-            setDepositTargetDesc(`Uỷ thác giao dịch ${amt} SOL cho cá voi ${selectedWhaleForConfig.address.slice(0, 6)}...`);
+            setDepositTargetDesc(`Delegate ${amt} SOL trading to whale ${selectedWhaleForConfig.address.slice(0, 6)}...`);
             setDepositRecommendedAmt(amt);
             setIsDepositOpen(true);
           }}
@@ -381,7 +393,18 @@ export default function CopyTradePage() {
         recommendedAmount={depositRecommendedAmt}
         onSuccess={(newBal) => {
           setSubWalletBalance(newBal);
-          setToastNotification(`Đã nạp thành công! Số dư Sub-Wallet hiện tại: ${newBal.toFixed(3)} SOL`);
+          setToastNotification(`Deposit successful! Current Sub-Wallet balance: ${newBal.toFixed(3)} SOL`);
+          setTimeout(() => setToastNotification(null), 4000);
+        }}
+      />
+
+      {/* Withdraw from Sub-Wallet Modal */}
+      <WithdrawSubWalletModal
+        isOpen={isWithdrawOpen}
+        onClose={() => setIsWithdrawOpen(false)}
+        onSuccess={(newBal) => {
+          setSubWalletBalance(newBal);
+          setToastNotification(`Withdrawal successful! Remaining Sub-Wallet balance: ${newBal.toFixed(3)} SOL`);
           setTimeout(() => setToastNotification(null), 4000);
         }}
       />

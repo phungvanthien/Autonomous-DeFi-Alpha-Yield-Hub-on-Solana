@@ -10,20 +10,37 @@ import { useRouter } from "next/navigation";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
-  const { walletAddress } = useSolanaWallet();
+  const { walletAddress, network } = useSolanaWallet();
   const [isAgentOpen, setIsAgentOpen] = useState(false);
   const [subWalletBalance, setSubWalletBalance] = useState<number>(0);
 
-  useEffect(() => {
+  const refreshSubBalance = () => {
     if (walletAddress) {
       const sw = getSubWallet(walletAddress);
       if (sw) {
-        fetchSubWalletBalance(sw.publicKey).then(setSubWalletBalance);
+        fetchSubWalletBalance(sw.publicKey, walletAddress, network).then(setSubWalletBalance);
       }
     } else {
       setSubWalletBalance(0);
     }
-  }, [walletAddress]);
+  };
+
+  useEffect(() => {
+    refreshSubBalance();
+
+    const handleSubBalanceUpdate = (e: any) => {
+      if (e?.detail?.balance !== undefined) {
+        setSubWalletBalance(e.detail.balance);
+      } else {
+        refreshSubBalance();
+      }
+    };
+
+    window.addEventListener("solana_subwallet_balance_updated", handleSubBalanceUpdate);
+    return () => {
+      window.removeEventListener("solana_subwallet_balance_updated", handleSubBalanceUpdate);
+    };
+  }, [walletAddress, network]);
 
   return (
     <div

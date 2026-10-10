@@ -1,9 +1,12 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { useSolanaWallet } from "@/components/wallet/wallet-context";
+import { DepositSubWalletModal } from "@/components/wallet/deposit-subwallet-modal";
+import { WithdrawSubWalletModal } from "@/components/wallet/withdraw-subwallet-modal";
 import { getSubWallet, fetchSubWalletBalance } from "@/lib/sub-wallet-manager";
+import { fetchLiveSolPrice } from "@/lib/token-price-service";
 import { getSavedPositions, CopyTradePosition } from "@/lib/copytrade-engine";
 import { getSavedLpPositions, ActiveLpPosition } from "@/lib/lp-agent-engine";
 import { formatCurrency, formatSol } from "@/lib/format-utils";
@@ -38,8 +41,9 @@ import {
 } from "lucide-react";
 
 export default function HomePage() {
-  const { walletAddress, isConnected, balance } = useSolanaWallet();
+  const { walletAddress, isConnected, balance, network } = useSolanaWallet();
   const [subWalletBalance, setSubWalletBalance] = useState<number>(0);
+  const [solPriceUsd, setSolPriceUsd] = useState<number>(185.0);
   const [copyPositions, setCopyPositions] = useState<CopyTradePosition[]>([]);
   const [lpPositions, setLpPositions] = useState<ActiveLpPosition[]>([]);
 
@@ -49,22 +53,44 @@ export default function HomePage() {
   // Interactive FAQ accordion state
   const [openFaq, setOpenFaq] = useState<number | null>(0);
 
-  useEffect(() => {
+  // Sub-Wallet Deposit & Withdraw Modals
+  const [isDepositOpen, setIsDepositOpen] = useState(false);
+  const [isWithdrawOpen, setIsWithdrawOpen] = useState(false);
+
+  const refreshSubBalance = useCallback(() => {
     if (walletAddress) {
       const sw = getSubWallet(walletAddress);
       if (sw) {
-        fetchSubWalletBalance(sw.publicKey).then(setSubWalletBalance);
+        fetchSubWalletBalance(sw.publicKey, walletAddress, network).then(setSubWalletBalance);
       }
     } else {
       setSubWalletBalance(0);
     }
+  }, [walletAddress, network]);
 
+  useEffect(() => {
+    refreshSubBalance();
     setCopyPositions(getSavedPositions());
     setLpPositions(getSavedLpPositions());
-  }, [walletAddress]);
+    fetchLiveSolPrice().then((price) => {
+      if (price > 0) setSolPriceUsd(price);
+    });
+
+    const handleSubBalanceUpdate = (e: any) => {
+      if (e?.detail?.balance !== undefined) {
+        setSubWalletBalance(e.detail.balance);
+      } else {
+        refreshSubBalance();
+      }
+    };
+
+    window.addEventListener("solana_subwallet_balance_updated", handleSubBalanceUpdate);
+    return () => {
+      window.removeEventListener("solana_subwallet_balance_updated", handleSubBalanceUpdate);
+    };
+  }, [walletAddress, network, refreshSubBalance]);
 
   const totalSolAssets = (isConnected ? balance : 0) + subWalletBalance;
-  const solPriceUsd = 152.4;
   const totalUsdAssets = totalSolAssets * solPriceUsd;
 
   const openCopyTrades = copyPositions.filter((p) => p.status === "OPEN" || p.status === "TP1_TAKEN");
@@ -816,14 +842,29 @@ export default function HomePage() {
                 </div>
 
                 <div className="grid grid-cols-2 gap-3 text-xs">
-                  <div className="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 text-center space-y-1">
-                    <span className="text-zinc-400 block text-[11px]">Instant Top-Up</span>
-                    <strong className="text-white font-mono">+0.2 / +0.5 SOL</strong>
-                  </div>
-                  <div className="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 text-center space-y-1">
-                    <span className="text-zinc-400 block text-[11px]">Sweep to Main</span>
-                    <strong className="text-emerald-400 font-mono">1-Click Instant</strong>
-                  </div>
+                  <button
+                    onClick={() => setIsDepositOpen(true)}
+                    className="p-3 rounded-xl bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 hover:border-amber-500/40 text-center space-y-1 transition-all cursor-pointer group"
+                  >
+                    <span className="text-zinc-400 group-hover:text-amber-300 block text-[11px] font-semibold">
+                      Instant Deposit
+                    </span>
+                    <strong className="text-white font-mono group-hover:text-amber-400">
+                      +0.2 / +0.5 SOL
+                    </strong>
+                  </button>
+                  <button
+                    onClick={() => setIsWithdrawOpen(true)}
+                    disabled={subWalletBalance <= 0.005}
+                    className="p-3 rounded-xl bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800 hover:border-blue-500/40 text-center space-y-1 transition-all cursor-pointer group disabled:opacity-50"
+                  >
+                    <span className="text-zinc-400 group-hover:text-blue-300 block text-[11px] font-semibold">
+                      Sweep to Main
+                    </span>
+                    <strong className="text-emerald-400 font-mono group-hover:text-blue-400">
+                      1-Click Instant
+                    </strong>
+                  </button>
                 </div>
 
                 <div className="p-3 rounded-xl bg-blue-500/5 border border-blue-500/20 text-xs text-blue-300 flex items-center gap-2.5">
@@ -1232,6 +1273,25 @@ export default function HomePage() {
           Non-Custodial • Zero Hidden Platform Fees • Full Asset Autonomy
         </div>
       </section>
+
+      {/* DEPOSIT MODAL */}
+      <DepositSubWalletModal
+        isOpen={isDepositOpen}
+        onClose={() => setIsDepositOpen(false)}
+        targetDescription="Sub-Wallet Vault Funding"
+        onSuccess={() => {
+          refreshSubBalance();
+        }}
+      />
+
+      {/* WITHDRAW MODAL */}
+      <WithdrawSubWalletModal
+        isOpen={isWithdrawOpen}
+        onClose={() => setIsWithdrawOpen(false)}
+        onSuccess={() => {
+          refreshSubBalance();
+        }}
+      />
     </div>
   );
 }

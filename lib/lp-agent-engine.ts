@@ -526,7 +526,7 @@ export function getInitialMockLpPositions(): ActiveLpPosition[] {
 export function deployLpPosition(
   pool: LpPoolData,
   config: LpAgentConfig,
-  currentSolPriceUsd: number = 152.4
+  currentSolPriceUsd: number = 185.0
 ): ActiveLpPosition {
   const lowerPrice = pool.currentPrice * (1 + config.priceRangeLowerPct / 100);
   const upperPrice = pool.currentPrice * (1 + config.priceRangeUpperPct / 100);

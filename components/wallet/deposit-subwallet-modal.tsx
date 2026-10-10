@@ -45,6 +45,7 @@ export function DepositSubWalletModal({
     walletAddress,
     isConnected,
     balance: mainBalance,
+    network,
     sendSolToSubWallet,
     refreshBalance: refreshMainBalance,
     connect,
@@ -55,6 +56,7 @@ export function DepositSubWalletModal({
   const [amountStr, setAmountStr] = useState<string>(recommendedAmount.toString());
   const [transferMode, setTransferMode] = useState<"ONCHAIN" | "FAUCET">("ONCHAIN");
   const [isProcessing, setIsProcessing] = useState(false);
+  const [txSignature, setTxSignature] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -74,16 +76,17 @@ export function DepositSubWalletModal({
     if (walletAddress) {
       const sw = getOrCreateSubWallet(walletAddress);
       setSubWallet(sw);
-      fetchSubWalletBalance(sw.publicKey, walletAddress).then(setSubBalance);
+      fetchSubWalletBalance(sw.publicKey, walletAddress, network).then(setSubBalance);
     } else {
       setSubWallet(null);
       setSubBalance(0);
     }
     setSuccessMsg(null);
     setErrorMsg(null);
-  }, [walletAddress, isOpen]);
+    setTxSignature(null);
+  }, [walletAddress, isOpen, network]);
 
-  // Lắng nghe cập nhật số dư từ các nguồn khác
+  // Listen for balance updates from other sources
   useEffect(() => {
     const handleBalanceUpdated = (e: any) => {
       if (e?.detail?.balance !== undefined) {
@@ -111,54 +114,62 @@ export function DepositSubWalletModal({
     setSuccessMsg(null);
 
     if (!walletAddress || !subWallet) {
-      setErrorMsg("Vui lòng kết nối ví chính trước khi nạp.");
+      setErrorMsg("Please connect your primary wallet before depositing.");
       return;
     }
 
     const amt = parseFloat(amountStr);
     if (isNaN(amt) || amt <= 0) {
-      setErrorMsg("Vui lòng nhập số lượng SOL hợp lệ (> 0).");
+      setErrorMsg("Please enter a valid SOL amount (> 0).");
       return;
     }
 
     if (transferMode === "ONCHAIN" && mainBalance < amt) {
-      setErrorMsg(`Số dư ví chính (${mainBalance.toFixed(3)} SOL) không đủ để nạp ${amt} SOL.`);
+      setErrorMsg(`Primary wallet balance (${mainBalance.toFixed(3)} SOL) is insufficient to deposit ${amt} SOL.`);
       return;
     }
 
     setIsProcessing(true);
+    setTxSignature(null);
     try {
       if (transferMode === "FAUCET") {
-        // Nạp tức thì qua Faucet Testnet / Demo
+        // Instant deposit via Testnet / Demo Faucet
         const newBal = depositSolSimulatedOrFaucet(walletAddress, amt);
         setSubBalance(newBal);
-        setSuccessMsg(`Đã nạp thành công ${amt} SOL vào Sub-Wallet via Faucet!`);
+        setSuccessMsg(`Successfully credited +${amt} SOL into Sub-Wallet via Testnet Faucet!`);
         if (onSuccess) onSuccess(newBal);
         setTimeout(() => {
           onClose();
-        }, 1500);
+        }, 1600);
       } else {
-        // Ký giao dịch On-chain qua ví Extension (Phantom/Solflare)
+        // Sign on-chain transaction via extension wallet (Phantom/Solflare)
         const sig = await sendSolToSubWallet(subWallet.publicKey, amt, false);
         if (sig) {
+          setTxSignature(sig);
           await refreshMainBalance();
-          const newBal = await fetchSubWalletBalance(subWallet.publicKey, walletAddress);
+          const newBal = await fetchSubWalletBalance(subWallet.publicKey, walletAddress, network);
           setSubBalance(newBal);
-          setSuccessMsg(`Chuyển ${amt} SOL on-chain thành công! Tx: ${sig.slice(0, 8)}...`);
+          setSuccessMsg(`Successfully deposited ${amt} SOL on-chain to Sub-Wallet!`);
           if (onSuccess) onSuccess(newBal);
           setTimeout(() => {
             onClose();
-          }, 1800);
+          }, 2200);
         } else {
-          setErrorMsg("Giao dịch không thành công hoặc người dùng huỷ xác nhận.");
+          setErrorMsg("Transaction failed or was canceled by user.");
         }
       }
     } catch (err: any) {
-      setErrorMsg(err?.message || "Lỗi khi chuyển SOL vào Sub-Wallet.");
+      setErrorMsg(err?.message || "Error depositing SOL into Sub-Wallet.");
     } finally {
       setIsProcessing(false);
     }
   };
+
+  const solscanUrl = txSignature
+    ? txSignature.startsWith("sim_")
+      ? null
+      : `https://solscan.io/tx/${txSignature}${network === "devnet" ? "?cluster=devnet" : ""}`
+    : null;
 
   const modalContent = (
     <div
@@ -183,13 +194,13 @@ export function DepositSubWalletModal({
             </div>
             <div>
               <h3 className="font-bold text-base text-white tracking-tight flex items-center gap-2">
-                Chuyển SOL vào Sub-Wallet
+                Deposit SOL to Sub-Wallet
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
                   Autonomous Vault
                 </span>
               </h3>
               <p className="text-xs text-zinc-400 mt-0.5">
-                Cấp vốn cho uỷ thác Copy-Trade cá voi & LP Agent tự động
+                Fund autonomous whale copy-trade delegation & LP agents
               </p>
             </div>
           </div>
@@ -201,12 +212,12 @@ export function DepositSubWalletModal({
           </button>
         </div>
 
-        {/* Target Context (nếu được mở từ hành động cụ thể) */}
+        {/* Target Context (if opened from a specific action) */}
         {targetDescription && (
           <div className="mt-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 flex items-start gap-2.5">
             <Sparkles className="size-4 shrink-0 text-amber-400 mt-0.5" />
             <div>
-              <span className="font-semibold text-amber-200">Mục đích cấp vốn: </span>
+              <span className="font-semibold text-amber-200">Funding Purpose: </span>
               {targetDescription}
             </div>
           </div>
@@ -217,23 +228,23 @@ export function DepositSubWalletModal({
           <div className="mt-5 p-5 rounded-2xl bg-zinc-950/70 border border-zinc-800 text-center space-y-3">
             <Wallet className="size-8 text-zinc-500 mx-auto" />
             <p className="text-xs text-zinc-400">
-              Bạn chưa kết nối ví extension (Phantom / Solflare). Hãy kết nối ví chính để thực hiện nạp SOL.
+              Wallet extension not connected (Phantom / Solflare). Please connect your primary wallet to deposit SOL.
             </p>
             <button
               onClick={() => connect("phantom")}
               className="py-2.5 px-5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-bold text-xs transition-colors cursor-pointer"
             >
-              Kết nối Phantom ngay
+              Connect Phantom Now
             </button>
           </div>
         ) : (
           <div className="mt-4 space-y-4">
             {/* Wallet Balance Comparison Row */}
             <div className="grid grid-cols-2 gap-3">
-              {/* Ví chính */}
+              {/* Connected Primary Wallet */}
               <div className="p-3.5 rounded-xl bg-zinc-950/80 border border-zinc-800/80 space-y-1">
                 <div className="flex items-center justify-between text-[11px] text-zinc-400">
-                  <span>Ví chính đã kết nối</span>
+                  <span>Connected Primary Wallet</span>
                   <span className="size-2 rounded-full bg-emerald-400 animate-pulse" />
                 </div>
                 <div className="font-mono text-base font-bold text-white">
@@ -262,9 +273,9 @@ export function DepositSubWalletModal({
               </div>
             </div>
 
-            {/* Chọn hình thức nạp */}
+            {/* Select deposit method */}
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-zinc-300">Phương thức nạp SOL:</label>
+              <label className="text-xs font-semibold text-zinc-300">Deposit Method:</label>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
@@ -277,10 +288,10 @@ export function DepositSubWalletModal({
                 >
                   <div className="flex items-center gap-1.5 text-xs font-bold text-amber-300">
                     <Wallet className="size-3.5" />
-                    Ký ví On-Chain
+                    On-Chain Wallet Sign
                   </div>
                   <p className="text-[10px] text-zinc-400 mt-1">
-                    Chuyển SOL thật từ Phantom / Solflare vào Sub-Wallet
+                    Transfer real SOL from Phantom / Solflare to Sub-Wallet
                   </p>
                 </button>
 
@@ -298,22 +309,22 @@ export function DepositSubWalletModal({
                     Testnet Faucet (Demo)
                   </div>
                   <p className="text-[10px] text-zinc-400 mt-1">
-                    Nạp nhanh 0.5-2 SOL thử nghiệm uỷ thác không tốn phí
+                    Quickly fund 0.5-2 SOL for risk-free delegation testing
                   </p>
                 </button>
               </div>
             </div>
 
-            {/* Input số lượng SOL */}
+            {/* Input SOL amount */}
             <div className="space-y-2">
               <div className="flex justify-between items-center text-xs">
-                <label className="font-semibold text-zinc-300">Số lượng SOL chuyển vào:</label>
+                <label className="font-semibold text-zinc-300">SOL Amount to Deposit:</label>
                 {transferMode === "ONCHAIN" && (
                   <button
                     onClick={() => setAmountStr(Math.max(0, mainBalance - 0.01).toFixed(3))}
                     className="text-amber-400 hover:underline font-mono text-[11px] cursor-pointer"
                   >
-                    Tối đa: {(Math.max(0, mainBalance - 0.01)).toFixed(3)} SOL
+                    Max: {(Math.max(0, mainBalance - 0.01)).toFixed(3)} SOL
                   </button>
                 )}
               </div>
@@ -361,9 +372,22 @@ export function DepositSubWalletModal({
             )}
 
             {successMsg && (
-              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-2">
-                <CheckCircle2 className="size-4 shrink-0 text-emerald-400" />
-                <span>{successMsg}</span>
+              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs space-y-1.5">
+                <div className="flex items-center gap-2 font-semibold">
+                  <CheckCircle2 className="size-4 shrink-0 text-emerald-400" />
+                  <span>{successMsg}</span>
+                </div>
+                {solscanUrl && (
+                  <a
+                    href={solscanUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-[11px] text-amber-400 hover:text-amber-300 hover:underline pt-0.5"
+                  >
+                    <span>View on Solscan Explorer</span>
+                    <ExternalLink className="size-3" />
+                  </a>
+                )}
               </div>
             )}
 
@@ -371,11 +395,11 @@ export function DepositSubWalletModal({
             <div className="p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/80 text-[11px] text-zinc-400 space-y-1">
               <div className="flex items-center gap-1.5 text-zinc-300 font-semibold">
                 <ShieldCheck className="size-3.5 text-emerald-400" />
-                Cơ chế bảo vệ vốn Sub-Wallet
+                Sub-Wallet Capital Protection
               </div>
               <p>
-                Sub-Wallet là ví con riêng biệt dành riêng cho bot uỷ thác. Khóa bí mật chỉ lưu trữ mã hóa cục bộ
-                trên trình duyệt của bạn. Bạn có thể rút toàn bộ SOL về ví chính bất cứ lúc nào.
+                The Sub-Wallet is a dedicated isolated keypair for autonomous bots. Private keys are encrypted and stored locally
+                in your browser. You can withdraw all SOL back to your primary wallet at any time.
               </p>
             </div>
 
@@ -392,14 +416,14 @@ export function DepositSubWalletModal({
               {isProcessing ? (
                 <>
                   <RefreshCw className="size-4 animate-spin" />
-                  <span>Đang xử lý nạp SOL...</span>
+                  <span>Processing SOL deposit...</span>
                 </>
               ) : (
                 <>
                   <span>
                     {transferMode === "FAUCET"
-                      ? `Nạp ngay +${amountStr} SOL via Faucet Demo`
-                      : `Xác nhận chuyển ${amountStr} SOL vào Sub-Wallet`}
+                      ? `Deposit +${amountStr} SOL via Faucet Demo`
+                      : `Confirm Deposit of ${amountStr} SOL to Sub-Wallet`}
                   </span>
                   <ArrowRight className="size-4" />
                 </>

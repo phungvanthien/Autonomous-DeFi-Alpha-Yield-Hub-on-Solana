@@ -24,7 +24,7 @@ export const TOKEN_2022_PROGRAM_ID = new PublicKey(
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 );
 
-const RPC_ENDPOINT = process.env.NEXT_PUBLIC_SOLANA_RPC || "https://api.mainnet-beta.solana.com";
+const RPC_ENDPOINT = process.env.NEXT_PUBLIC_SOLANA_RPC || "https://solana-rpc.publicnode.com";
 
 export interface FluxExecutionResult {
   success: boolean;

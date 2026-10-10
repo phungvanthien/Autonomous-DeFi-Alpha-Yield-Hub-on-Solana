@@ -2,14 +2,20 @@
 
 import { useState, useEffect } from "react";
 import { useSolanaWallet } from "@/components/wallet/wallet-context";
+import { DepositSubWalletModal } from "@/components/wallet/deposit-subwallet-modal";
+import { WithdrawSubWalletModal } from "@/components/wallet/withdraw-subwallet-modal";
 import {
   SubWalletData,
   getOrCreateSubWallet,
   fetchSubWalletBalance,
-  withdrawSolFromSubWallet,
   exportSubWalletPrivateKey,
   resetSubWallet,
+  fetchSubWalletTokenHoldings,
+  SubWalletTokenHolding,
 } from "@/lib/sub-wallet-manager";
+import { fetchLiveSolPrice } from "@/lib/token-price-service";
+import { executeSubWalletSellToken } from "@/lib/jupiter-swap-router";
+import { formatCurrency, formatSol } from "@/lib/format-utils";
 import {
   Wallet,
   ArrowDownRight,
@@ -28,6 +34,11 @@ import {
   Sliders,
   DollarSign,
   Lock,
+  Coins,
+  TrendingUp,
+  ArrowRightLeft,
+  Sparkles,
+  ExternalLink,
 } from "lucide-react";
 
 export default function WalletsPage() {
@@ -35,20 +46,27 @@ export default function WalletsPage() {
     walletAddress,
     isConnected,
     balance: mainBalance,
-    sendSolToSubWallet,
+    network,
+    setNetwork,
     refreshBalance: refreshMainBalance,
   } = useSolanaWallet();
 
   const [subWallet, setSubWallet] = useState<SubWalletData | null>(null);
   const [subBalance, setSubBalance] = useState<number>(0);
+  const [solPriceUsd, setSolPriceUsd] = useState<number>(185.0);
+  const [tokenHoldings, setTokenHoldings] = useState<SubWalletTokenHolding[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isDepositing, setIsDepositing] = useState(false);
   const [depositAmount, setDepositAmount] = useState<string>("0.2");
-  const [isWithdrawing, setIsWithdrawing] = useState(false);
   const [withdrawAmount, setWithdrawAmount] = useState<string>("");
+  const [liquidatingMint, setLiquidatingMint] = useState<string | null>(null);
   const [showPrivateKey, setShowPrivateKey] = useState(false);
   const [copiedAddr, setCopiedAddr] = useState(false);
   const [copiedKey, setCopiedKey] = useState(false);
+
+  // Modal states for Deposit & Withdraw
+  const [isDepositModalOpen, setIsDepositModalOpen] = useState(false);
+  const [depositModalAmt, setDepositModalAmt] = useState<number>(0.2);
+  const [isWithdrawModalOpen, setIsWithdrawModalOpen] = useState(false);
 
   // Allowance & Daily limits
   const [dailyMaxSol, setDailyMaxSol] = useState<number>(1.5);
@@ -59,9 +77,23 @@ export default function WalletsPage() {
     const sw = getOrCreateSubWallet(address);
     setSubWallet(sw);
     setIsRefreshing(true);
-    const bal = await fetchSubWalletBalance(sw.publicKey, address);
-    setSubBalance(bal);
-    setIsRefreshing(false);
+    try {
+      const [bal, liveSol, holdingsData] = await Promise.all([
+        fetchSubWalletBalance(sw.publicKey, address, network),
+        fetchLiveSolPrice(),
+        fetchSubWalletTokenHoldings(sw.publicKey, network),
+      ]);
+      setSubBalance(bal);
+      setSubWallet((prev) => (prev ? { ...prev, balance: bal } : prev));
+      if (liveSol > 0) {
+        setSolPriceUsd(liveSol);
+      } else if (holdingsData.solPriceUsd > 0) {
+        setSolPriceUsd(holdingsData.solPriceUsd);
+      }
+      setTokenHoldings(holdingsData.tokens);
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
   useEffect(() => {
@@ -70,58 +102,67 @@ export default function WalletsPage() {
     } else {
       setSubWallet(null);
       setSubBalance(0);
+      setTokenHoldings([]);
     }
 
     const handleBalanceUpdated = (e: any) => {
       if (e?.detail?.balance !== undefined) {
         setSubBalance(e.detail.balance);
+        setSubWallet((prev) => (prev ? { ...prev, balance: e.detail.balance } : prev));
       }
     };
     window.addEventListener("solana_subwallet_balance_updated", handleBalanceUpdated);
     return () => {
       window.removeEventListener("solana_subwallet_balance_updated", handleBalanceUpdated);
     };
-  }, [walletAddress]);
+  }, [walletAddress, network]);
 
-  const handleDepositSol = async (amount: number, isFaucet: boolean = false) => {
-    if (!subWallet) return;
-    setIsDepositing(true);
+  const handleLiquidateToken = async (holding: SubWalletTokenHolding) => {
+    if (!subWallet || !walletAddress) return;
+    const confirmSwap = confirm(
+      `Confirm liquidating 100% of ${holding.symbol} (~${holding.amount} tokens, value ≈ ${formatCurrency(holding.valueUsd)}) back into SOL via Jupiter DEX?`
+    );
+    if (!confirmSwap) return;
+
+    setLiquidatingMint(holding.mint);
     try {
-      const sig = await sendSolToSubWallet(subWallet.publicKey, amount, isFaucet);
-      if (sig) {
-        alert(`Successfully deposited ${amount} SOL to Sub-Wallet!\nTx: ${sig.slice(0, 10)}...`);
-        await loadSubWallet(subWallet.ownerAddress);
-        await refreshMainBalance();
+      const estSol = solPriceUsd > 0 ? holding.valueUsd / solPriceUsd : 0.05;
+      const res = await executeSubWalletSellToken(subWallet, holding.mint, estSol, 3.0);
+
+      // Cập nhật trạng thái trong localStorage nếu là vị thế copy trade
+      try {
+        const positionsRaw = localStorage.getItem("solana_copytrade_positions");
+        if (positionsRaw) {
+          const parsed = JSON.parse(positionsRaw);
+          if (Array.isArray(parsed)) {
+            const updated = parsed.map((p: any) => {
+              if (p.tokenMint === holding.mint && (p.status === "OPEN" || p.status === "TP1_TAKEN")) {
+                return {
+                  ...p,
+                  status: "CLOSED_TP",
+                  closeReason: "Manual liquidation via Sub-Wallet Vault",
+                };
+              }
+              return p;
+            });
+            localStorage.setItem("solana_copytrade_positions", JSON.stringify(updated));
+            window.dispatchEvent(new CustomEvent("solana_copytrade_positions_updated", { detail: updated }));
+          }
+        }
+      } catch {
+        // ignore
+      }
+
+      await loadSubWallet(walletAddress);
+      await refreshMainBalance();
+
+      if (res.signature && !res.isSimulated) {
+        alert(`Liquidated ${holding.symbol} on-chain successfully!\nTx: ${res.signature.slice(0, 10)}...`);
+      } else {
+        alert(`Liquidated ${holding.symbol} back into SOL capital successfully!`);
       }
     } finally {
-      setIsDepositing(false);
-    }
-  };
-
-  const handleWithdraw = async (all: boolean = true) => {
-    if (!subWallet || !walletAddress) return;
-    if (subBalance <= 0.005) {
-      alert("Sub-Wallet balance is too low (requires at least 0.005 SOL for Solana network transaction fees)");
-      return;
-    }
-
-    const amt = all ? undefined : parseFloat(withdrawAmount);
-    const confirmWithdraw = confirm(
-      `Confirm withdrawing ${all ? "entire ~" + subBalance.toFixed(3) : amt} SOL back to primary wallet (${walletAddress.slice(0, 6)}...)?`
-    );
-    if (!confirmWithdraw) return;
-
-    setIsWithdrawing(true);
-    const res = await withdrawSolFromSubWallet(subWallet, walletAddress, amt);
-    setIsWithdrawing(false);
-
-    if (res.success) {
-      alert(`Withdrawal successful!\nTx signature: ${res.signature?.slice(0, 10)}...`);
-      await loadSubWallet(subWallet.ownerAddress);
-      await refreshMainBalance();
-      setWithdrawAmount("");
-    } else {
-      alert(`Withdrawal failed: ${res.error}`);
+      setLiquidatingMint(null);
     }
   };
 
@@ -150,6 +191,11 @@ export default function WalletsPage() {
       setTimeout(() => setCopiedKey(false), 2000);
     }
   };
+
+  const totalTokensValueUsd = tokenHoldings.reduce((sum, t) => sum + (t.valueUsd || 0), 0);
+  const subSolValueUsd = subBalance * solPriceUsd;
+  const subTotalPortfolioUsd = subSolValueUsd + totalTokensValueUsd;
+  const mainSolValueUsd = mainBalance * solPriceUsd;
 
   if (!isConnected) {
     return (
@@ -181,14 +227,27 @@ export default function WalletsPage() {
           </p>
         </div>
 
-        <button
-          onClick={() => subWallet && loadSubWallet(subWallet.ownerAddress)}
-          disabled={isRefreshing}
-          className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer self-start md:self-auto"
-        >
-          <RefreshCw className={`size-3.5 ${isRefreshing ? "animate-spin text-amber-400" : ""}`} />
-          <span>Refresh Balance</span>
-        </button>
+        <div className="flex items-center gap-3">
+          {/* Live SOL Price Badge */}
+          <div className="px-3 py-1.5 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center gap-2 font-mono text-xs">
+            <span className="size-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-zinc-400 text-[11px]">SOL:</span>
+            <span className="text-white font-bold">${solPriceUsd.toFixed(2)}</span>
+            <span className="text-[10px] text-zinc-500 font-sans">LIVE</span>
+          </div>
+
+          <button
+            onClick={async () => {
+              if (subWallet) await loadSubWallet(subWallet.ownerAddress);
+              await refreshMainBalance();
+            }}
+            disabled={isRefreshing}
+            className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
+          >
+            <RefreshCw className={`size-3.5 ${isRefreshing ? "animate-spin text-amber-400" : ""}`} />
+            <span>Refresh</span>
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -215,26 +274,46 @@ export default function WalletsPage() {
                   </p>
                 </div>
               </div>
+
+              {/* Aggregated Total Portfolio Valuation */}
+              <div className="text-right hidden sm:block">
+                <span className="text-[10px] text-zinc-400 uppercase font-semibold">Total Sub-Wallet Assets</span>
+                <div className="text-lg font-bold font-mono text-emerald-400">
+                  {formatCurrency(subTotalPortfolioUsd)}
+                </div>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 font-mono">
               <div className="p-4 rounded-xl bg-zinc-950/70 border border-zinc-800/80">
-                <span className="text-[11px] text-zinc-500 uppercase font-semibold">Sub-Wallet Balance</span>
+                <div className="flex justify-between items-center">
+                  <span className="text-[11px] text-zinc-500 uppercase font-semibold">Sub-Wallet SOL Balance</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-sans font-semibold">
+                    Vault Safe
+                  </span>
+                </div>
                 <div className="text-2xl font-bold text-emerald-400 mt-1">
                   {subBalance.toFixed(4)} SOL
                 </div>
-                <div className="text-[11px] text-zinc-400 mt-0.5">
-                  ≈ ${(subBalance * 152.4).toFixed(2)} USD
+                <div className="text-[11px] text-zinc-300 mt-0.5 flex items-center justify-between">
+                  <span>≈ {formatCurrency(subSolValueUsd)}</span>
+                  <span className="text-[10px] text-zinc-500 font-sans">@ ${solPriceUsd.toFixed(2)}/SOL</span>
                 </div>
               </div>
 
               <div className="p-4 rounded-xl bg-zinc-950/70 border border-zinc-800/80">
-                <span className="text-[11px] text-zinc-500 uppercase font-semibold">Primary Wallet Balance (Browser Extension)</span>
+                <div className="flex justify-between items-center">
+                  <span className="text-[11px] text-zinc-500 uppercase font-semibold">Primary Wallet (Browser Extension)</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 font-sans font-semibold">
+                    Master
+                  </span>
+                </div>
                 <div className="text-2xl font-bold text-white mt-1">
                   {mainBalance.toFixed(4)} SOL
                 </div>
-                <div className="text-[11px] text-zinc-400 mt-0.5">
-                  ≈ ${(mainBalance * 152.4).toFixed(2)} USD
+                <div className="text-[11px] text-zinc-300 mt-0.5 flex items-center justify-between">
+                  <span>≈ {formatCurrency(mainSolValueUsd)}</span>
+                  <span className="text-[10px] text-zinc-500 font-sans">@ ${solPriceUsd.toFixed(2)}/SOL</span>
                 </div>
               </div>
             </div>
@@ -245,13 +324,174 @@ export default function WalletsPage() {
                 <span className="text-zinc-500 text-[11px]">Sub-Wallet Address: </span>
                 <span className="text-zinc-300 font-bold select-all">{subWallet?.publicKey}</span>
               </div>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  onClick={() => subWallet && copyToClipboard(subWallet.publicKey, "addr")}
+                  className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors cursor-pointer"
+                  title="Copy Address"
+                >
+                  {copiedAddr ? <Check className="size-4 text-emerald-400" /> : <Copy className="size-4" />}
+                </button>
+                <a
+                  href={`https://solscan.io/account/${subWallet?.publicKey}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors"
+                  title="View on Solscan"
+                >
+                  <ExternalLink className="size-4" />
+                </a>
+              </div>
+            </div>
+
+            {/* Quick Modal Actions */}
+            <div className="grid grid-cols-2 gap-2.5 pt-1">
               <button
-                onClick={() => subWallet && copyToClipboard(subWallet.publicKey, "addr")}
-                className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors shrink-0"
-                title="Copy Address"
+                onClick={() => {
+                  setDepositModalAmt(0.3);
+                  setIsDepositModalOpen(true);
+                }}
+                className="py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-400 hover:from-emerald-400 hover:to-emerald-300 text-black font-extrabold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-emerald-500/20 cursor-pointer"
               >
-                {copiedAddr ? <Check className="size-4 text-emerald-400" /> : <Copy className="size-4" />}
+                <ArrowDownRight className="size-4" />
+                <span>Deposit SOL</span>
               </button>
+              <button
+                onClick={() => setIsWithdrawModalOpen(true)}
+                disabled={subBalance <= 0.005}
+                className="py-2.5 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all border border-zinc-700 disabled:opacity-50 cursor-pointer"
+              >
+                <ArrowUpRight className="size-4 text-blue-400" />
+                <span>Withdraw Funds</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Sub-Wallet SPL Token Holdings & Asset Vault */}
+          <div className="p-5 rounded-2xl bg-zinc-900/70 border border-zinc-800 space-y-4 shadow-lg">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 pb-3 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 rounded-lg bg-amber-500/10 text-amber-400">
+                  <Coins className="size-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    Sub-Wallet Token Holdings & Asset Vault
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 font-mono">
+                      {tokenHoldings.length} Tokens
+                    </span>
+                  </h3>
+                  <p className="text-[11px] text-zinc-400 mt-0.5">
+                    Live SPL tokens held in vault with dynamic USD pricing via DexScreener & Jupiter
+                  </p>
+                </div>
+              </div>
+
+              <div className="text-right">
+                <span className="text-[10px] text-zinc-400 uppercase font-semibold">Total SPL Token Value</span>
+                <div className="text-base font-bold font-mono text-amber-400">
+                  {formatCurrency(totalTokensValueUsd)}
+                </div>
+              </div>
+            </div>
+
+            {/* Token Table */}
+            <div className="overflow-x-auto">
+              {tokenHoldings.length === 0 ? (
+                <div className="py-8 text-center text-zinc-500 text-xs space-y-1.5">
+                  <Coins className="size-8 mx-auto text-zinc-600 mb-1" />
+                  <p className="font-semibold text-zinc-400">No SPL tokens currently held in Sub-Wallet.</p>
+                  <p className="text-[11px] text-zinc-500 max-w-md mx-auto">
+                    When you activate automated copy-trading or LP harvesting, bought tokens will be held securely in this vault with real-time USD conversion.
+                  </p>
+                </div>
+              ) : (
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-zinc-800 text-[11px] text-zinc-400 font-semibold">
+                      <th className="pb-2">Token</th>
+                      <th className="pb-2">Type</th>
+                      <th className="pb-2">Amount</th>
+                      <th className="pb-2">Live Unit Price</th>
+                      <th className="pb-2">Total USD Value</th>
+                      <th className="pb-2 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-800/60 font-mono">
+                    {tokenHoldings.map((token) => (
+                      <tr key={token.mint} className="hover:bg-zinc-800/30 transition-colors">
+                        <td className="py-3">
+                          <div className="flex items-center gap-2">
+                            <div className="size-6 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-[10px] font-bold text-amber-400 font-sans">
+                              {token.symbol.slice(0, 3)}
+                            </div>
+                            <div>
+                              <div className="font-bold text-white">{token.symbol}</div>
+                              <div className="text-[10px] text-zinc-500 font-sans">{token.name}</div>
+                            </div>
+                          </div>
+                        </td>
+
+                        <td className="py-3 font-sans">
+                          {token.source === "ONCHAIN" ? (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">
+                              ON-CHAIN
+                            </span>
+                          ) : (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 font-semibold">
+                              COPY-TRADE
+                            </span>
+                          )}
+                        </td>
+
+                        <td className="py-3 text-zinc-200">
+                          {token.amount.toLocaleString("en-US", { maximumFractionDigits: 4 })}
+                        </td>
+
+                        <td className="py-3 text-zinc-300">
+                          ${token.priceUsd < 0.001
+                            ? token.priceUsd.toFixed(6)
+                            : token.priceUsd.toFixed(token.priceUsd < 1 ? 4 : 2)}
+                          {token.priceChange24h !== undefined && (
+                            <span
+                              className={`ml-1 text-[10px] ${
+                                token.priceChange24h >= 0 ? "text-emerald-400" : "text-red-400"
+                              }`}
+                            >
+                              {token.priceChange24h >= 0 ? "+" : ""}
+                              {token.priceChange24h.toFixed(1)}%
+                            </span>
+                          )}
+                        </td>
+
+                        <td className="py-3 font-bold text-emerald-400">
+                          {formatCurrency(token.valueUsd)}
+                        </td>
+
+                        <td className="py-3 text-right font-sans">
+                          <button
+                            onClick={() => handleLiquidateToken(token)}
+                            disabled={liquidatingMint === token.mint}
+                            className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-amber-500/20 text-zinc-300 hover:text-amber-300 border border-zinc-700 hover:border-amber-500/30 text-[11px] font-semibold transition-all cursor-pointer disabled:opacity-50 inline-flex items-center gap-1"
+                          >
+                            {liquidatingMint === token.mint ? (
+                              <>
+                                <RefreshCw className="size-3 animate-spin" />
+                                <span>Selling...</span>
+                              </>
+                            ) : (
+                              <>
+                                <ArrowRightLeft className="size-3" />
+                                <span>Sell to SOL</span>
+                              </>
+                            )}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
 
@@ -268,7 +508,10 @@ export default function WalletsPage() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => handleDepositSol(0.5, true)}
+                  onClick={() => {
+                    setDepositModalAmt(0.5);
+                    setIsDepositModalOpen(true);
+                  }}
                   className="text-emerald-400 hover:text-emerald-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer bg-emerald-500/10 px-2 py-0.5 rounded-lg border border-emerald-500/20"
                 >
                   <Zap className="size-3" />
@@ -295,22 +538,29 @@ export default function WalletsPage() {
                       <button
                         key={amt}
                         type="button"
-                        onClick={() => setDepositAmount(amt.toString())}
-                        className="px-2 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-mono"
+                        onClick={() => {
+                          setDepositAmount(amt.toString());
+                          setDepositModalAmt(amt);
+                          setIsDepositModalOpen(true);
+                        }}
+                        className="px-2 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-mono cursor-pointer"
                       >
-                        {amt}
+                        +{amt}
                       </button>
                     ))}
                   </div>
                 </div>
 
                 <button
-                  onClick={() => handleDepositSol(parseFloat(depositAmount) || 0.1)}
-                  disabled={isDepositing}
-                  className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-black font-extrabold text-xs transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  onClick={() => {
+                    const amt = parseFloat(depositAmount) || 0.2;
+                    setDepositModalAmt(amt);
+                    setIsDepositModalOpen(true);
+                  }}
+                  className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold text-xs transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md shadow-emerald-500/20"
                 >
-                  {isDepositing ? <RefreshCw className="size-4 animate-spin" /> : <ArrowDownRight className="size-4" />}
-                  <span>{isDepositing ? "Broadcasting transaction..." : `Deposit ${depositAmount} SOL to Sub-Wallet`}</span>
+                  <ArrowDownRight className="size-4" />
+                  <span>Deposit {depositAmount} SOL (Open Modal)</span>
                 </button>
               </div>
             </div>
@@ -339,23 +589,23 @@ export default function WalletsPage() {
                   />
                   <button
                     type="button"
-                    onClick={() => setWithdrawAmount(Math.max(0, subBalance - 0.005).toFixed(3))}
-                    className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-mono"
+                    onClick={() => {
+                      setIsWithdrawModalOpen(true);
+                    }}
+                    className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-mono cursor-pointer"
                   >
                     Max
                   </button>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => handleWithdraw(true)}
-                    disabled={isWithdrawing || subBalance <= 0.005}
-                    className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-white font-bold text-xs transition-all flex items-center justify-center gap-2 cursor-pointer border border-zinc-700"
-                  >
-                    {isWithdrawing ? <RefreshCw className="size-4 animate-spin" /> : <ArrowUpRight className="size-4 text-blue-400" />}
-                    <span>Withdraw All SOL</span>
-                  </button>
-                </div>
+                <button
+                  onClick={() => setIsWithdrawModalOpen(true)}
+                  disabled={subBalance <= 0.005}
+                  className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold text-xs transition-all flex items-center justify-center gap-2 cursor-pointer border border-blue-500/40 shadow-md shadow-blue-500/20"
+                >
+                  <ArrowUpRight className="size-4 text-blue-300" />
+                  <span>Open 1-Click Withdraw Modal</span>
+                </button>
               </div>
             </div>
           </div>
@@ -379,7 +629,9 @@ export default function WalletsPage() {
               <div className="space-y-1">
                 <label className="text-zinc-300 font-semibold flex justify-between">
                   <span>Daily Maximum Spend:</span>
-                  <span className="font-mono text-amber-400 font-bold">{dailyMaxSol} SOL</span>
+                  <span className="font-mono text-amber-400 font-bold">
+                    {dailyMaxSol} SOL (≈ {formatCurrency(dailyMaxSol * solPriceUsd)})
+                  </span>
                 </label>
                 <input
                   type="range"
@@ -395,7 +647,9 @@ export default function WalletsPage() {
               <div className="space-y-1">
                 <label className="text-zinc-300 font-semibold flex justify-between">
                   <span>Max Allocation per Copy Order:</span>
-                  <span className="font-mono text-amber-400 font-bold">{maxPerTradeSol} SOL</span>
+                  <span className="font-mono text-amber-400 font-bold">
+                    {maxPerTradeSol} SOL (≈ {formatCurrency(maxPerTradeSol * solPriceUsd)})
+                  </span>
                 </label>
                 <input
                   type="range"
@@ -475,6 +729,26 @@ export default function WalletsPage() {
           </div>
         </div>
       </div>
+
+      {/* DEPOSIT MODAL */}
+      <DepositSubWalletModal
+        isOpen={isDepositModalOpen}
+        onClose={() => setIsDepositModalOpen(false)}
+        recommendedAmount={depositModalAmt}
+        targetDescription="Sub-Wallet Vault Funding"
+        onSuccess={(newBal) => {
+          if (walletAddress) loadSubWallet(walletAddress);
+        }}
+      />
+
+      {/* WITHDRAW MODAL */}
+      <WithdrawSubWalletModal
+        isOpen={isWithdrawModalOpen}
+        onClose={() => setIsWithdrawModalOpen(false)}
+        onSuccess={(newBal) => {
+          if (walletAddress) loadSubWallet(walletAddress);
+        }}
+      />
     </div>
   );
 }

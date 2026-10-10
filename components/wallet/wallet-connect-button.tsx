@@ -13,6 +13,8 @@ import {
   Sparkles,
   X,
   ChevronRight,
+  RefreshCw,
+  Globe,
 } from "lucide-react";
 import { useSolanaWallet } from "./wallet-context";
 
@@ -23,6 +25,10 @@ export function WalletConnectButton() {
     isConnected,
     isConnecting,
     balance,
+    network,
+    setNetwork,
+    devnetBalance,
+    refreshBalance,
     connect,
     disconnect,
     installedWallets,
@@ -31,6 +37,7 @@ export function WalletConnectButton() {
   const [isOpenMenu, setIsOpenMenu] = useState(false);
   const [isOpenSelectModal, setIsOpenSelectModal] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [mounted, setMounted] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -242,6 +249,15 @@ export function WalletConnectButton() {
 
   if (isConnected && walletAddress) {
     const shortAddress = `${walletAddress.slice(0, 4)}...${walletAddress.slice(-4)}`;
+    const displayBalance =
+      balance === 0
+        ? "0.00"
+        : balance < 0.01
+        ? balance.toFixed(4)
+        : balance < 10
+        ? balance.toFixed(3)
+        : balance.toFixed(2);
+
     return (
       <div className="relative" ref={dropdownRef}>
         <button
@@ -249,9 +265,9 @@ export function WalletConnectButton() {
           className="flex items-center gap-2.5 px-3.5 py-1.5 rounded-xl bg-zinc-900 border border-zinc-700/80 hover:border-zinc-600 text-white transition-all shadow-sm cursor-pointer text-xs"
         >
           <div className="flex items-center gap-1.5">
-            <span className="size-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="font-mono font-medium text-emerald-400">
-              {balance.toFixed(2)} SOL
+            <span className={`size-2 rounded-full ${network === "devnet" ? "bg-purple-400" : "bg-emerald-400"} animate-pulse`} />
+            <span className={`font-mono font-medium ${network === "devnet" ? "text-purple-300" : "text-emerald-400"}`}>
+              {displayBalance} SOL
             </span>
           </div>
           <span className="text-zinc-600">|</span>
@@ -260,14 +276,73 @@ export function WalletConnectButton() {
         </button>
 
         {isOpenMenu && (
-          <div className="absolute right-0 mt-2 w-64 rounded-2xl bg-zinc-900/95 backdrop-blur-xl border border-zinc-700/80 shadow-2xl z-50 p-2 text-xs ring-1 ring-white/10 animate-in fade-in duration-150">
+          <div className="absolute right-0 mt-2 w-72 rounded-2xl bg-zinc-900/95 backdrop-blur-xl border border-zinc-700/80 shadow-2xl z-50 p-2 text-xs ring-1 ring-white/10 animate-in fade-in duration-150">
             <div className="px-3 py-2.5 border-b border-zinc-800 mb-1">
-              <p className="text-[10px] text-zinc-400 uppercase font-semibold tracking-wider">Main Wallet (Extension)</p>
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] text-zinc-400 uppercase font-semibold tracking-wider">Main Wallet (Extension)</p>
+                <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-zinc-800 text-zinc-300 capitalize font-medium border border-zinc-700/60">
+                  {walletName || "Solana"}
+                </span>
+              </div>
               <p className="font-mono text-zinc-200 text-xs truncate mt-1 select-all">{walletAddress}</p>
-              <span className="inline-block mt-1.5 text-[10px] px-2 py-0.5 rounded-md bg-zinc-800 text-zinc-300 capitalize font-medium border border-zinc-700/60">
-                {walletName || "Solana"} Wallet
-              </span>
             </div>
+
+            {/* Detailed Balance & Network Box */}
+            <div className="px-3 py-2 bg-zinc-950/80 rounded-xl border border-zinc-800/80 my-1.5 space-y-1.5 font-mono">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-zinc-400 font-sans">SOL Balance:</span>
+                <span className={`font-bold text-sm ${network === "devnet" ? "text-purple-300" : "text-emerald-400"}`}>
+                  {balance.toFixed(4)} SOL
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[10px] pt-1 border-t border-zinc-800/60 font-sans">
+                <span className="text-zinc-400 flex items-center gap-1">
+                  <Globe className="size-3" />
+                  Cluster:
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setNetwork(network === "mainnet" ? "devnet" : "mainnet")}
+                  className="px-2 py-0.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold transition-colors cursor-pointer flex items-center gap-1"
+                  title="Click to toggle Mainnet / Devnet cluster"
+                >
+                  <span className={`size-1.5 rounded-full ${network === "mainnet" ? "bg-emerald-400" : "bg-purple-400"}`} />
+                  <span className="capitalize">{network}</span>
+                  <span className="text-zinc-500 text-[9px]">(toggle)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Devnet Balance Detected Hint */}
+            {network === "mainnet" && typeof devnetBalance === "number" && devnetBalance > 0 && (
+              <div className="p-2 rounded-xl bg-purple-500/10 border border-purple-500/30 text-[11px] text-purple-300 my-1">
+                <div className="flex items-center justify-between">
+                  <span>Devnet: {devnetBalance.toFixed(3)} SOL</span>
+                  <button
+                    onClick={() => setNetwork("devnet")}
+                    className="text-[10px] underline hover:text-purple-200 cursor-pointer font-bold ml-1"
+                  >
+                    Switch to Devnet
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Refresh Balance Action */}
+            <button
+              onClick={async () => {
+                setIsRefreshing(true);
+                await refreshBalance();
+                setIsRefreshing(false);
+              }}
+              disabled={isRefreshing}
+              className="w-full flex items-center justify-between px-3 py-2 rounded-lg hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors cursor-pointer"
+            >
+              <span className="flex items-center gap-2">
+                <RefreshCw className={`size-3.5 ${isRefreshing ? "animate-spin text-amber-400" : ""}`} />
+                <span>{isRefreshing ? "Updating Balance..." : "Refresh Balance"}</span>
+              </span>
+            </button>
 
             <button
               onClick={handleCopy}
@@ -280,7 +355,7 @@ export function WalletConnectButton() {
             </button>
 
             <a
-              href={`https://solscan.io/account/${walletAddress}`}
+              href={`https://solscan.io/account/${walletAddress}${network === "devnet" ? "?cluster=devnet" : ""}`}
               target="_blank"
               rel="noreferrer"
               className="w-full flex items-center justify-between px-3 py-2 rounded-lg hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors"

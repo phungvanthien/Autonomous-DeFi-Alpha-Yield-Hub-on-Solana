@@ -158,7 +158,7 @@ export interface WhaleDiscoveryPanelProps {
 }
 
 export function WhaleDiscoveryPanel({ onOpenConfigModal, onOpenAgent, onWhalesUpdated }: WhaleDiscoveryPanelProps = {}) {
-  const { walletAddress } = useSolanaWallet();
+  const { walletAddress, network } = useSolanaWallet();
   const [mounted, setMounted] = useState(false);
   const [whales, setWhales] = useState<Whale[]>([]);
   const [discoveryLoading, setDiscoveryLoading] = useState(true);
@@ -442,10 +442,20 @@ export function WhaleDiscoveryPanel({ onOpenConfigModal, onOpenAgent, onWhalesUp
     if (walletAddress) {
       const sw = getSubWallet(walletAddress);
       if (sw) {
-        fetchSubWalletBalance(sw.publicKey).then(setSubWalletBalance);
+        fetchSubWalletBalance(sw.publicKey, walletAddress, network).then(setSubWalletBalance);
       }
+    } else {
+      setSubWalletBalance(0);
     }
-  }, [walletAddress]);
+
+    const handleSubBalanceUpdate = (e: any) => {
+      if (e?.detail?.balance !== undefined) {
+        setSubWalletBalance(e.detail.balance);
+      }
+    };
+    window.addEventListener("solana_subwallet_balance_updated", handleSubBalanceUpdate);
+    return () => window.removeEventListener("solana_subwallet_balance_updated", handleSubBalanceUpdate);
+  }, [walletAddress, network]);
 
   const [selectedWallet, setSelectedWallet] = useState<string | null>(null);
   

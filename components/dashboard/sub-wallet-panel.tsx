@@ -19,16 +19,19 @@ import {
   Eye,
   EyeOff,
   Zap,
+  Coins,
 } from "lucide-react";
 import { useSolanaWallet } from "@/components/wallet/wallet-context";
+import { DepositSubWalletModal } from "@/components/wallet/deposit-subwallet-modal";
+import { WithdrawSubWalletModal } from "@/components/wallet/withdraw-subwallet-modal";
 import {
   SubWalletData,
   getOrCreateSubWallet,
   fetchSubWalletBalance,
-  withdrawSolFromSubWallet,
   exportSubWalletPrivateKey,
 } from "@/lib/sub-wallet-manager";
 import { executeSubWalletSellToken } from "@/lib/jupiter-swap-router";
+import { fetchLiveSolPrice, fetchLiveTokenPrices } from "@/lib/token-price-service";
 import {
   CopyTradeConfig,
   CopyTradePosition,
@@ -43,13 +46,14 @@ interface SubWalletPanelProps {
 }
 
 export function SubWalletPanel({ onOpenConfigModal }: SubWalletPanelProps) {
-  const { walletAddress, isConnected, sendSolToSubWallet, refreshBalance: refreshMainBalance } = useSolanaWallet();
+  const { walletAddress, isConnected, network, refreshBalance: refreshMainBalance } = useSolanaWallet();
   const [subWallet, setSubWallet] = useState<SubWalletData | null>(null);
   const [subBalance, setSubBalance] = useState<number>(0);
+  const [solPriceUsd, setSolPriceUsd] = useState<number>(185.0);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isDepositing, setIsDepositing] = useState(false);
-  const [depositAmount, setDepositAmount] = useState<string>("0.2");
-  const [isWithdrawing, setIsWithdrawing] = useState(false);
+  const [isDepositOpen, setIsDepositOpen] = useState(false);
+  const [depositAmountModal, setDepositAmountModal] = useState<number>(0.3);
+  const [isWithdrawOpen, setIsWithdrawOpen] = useState(false);
   const [showPrivateKey, setShowPrivateKey] = useState(false);
   const [copiedAddr, setCopiedAddr] = useState(false);
   const [copiedKey, setCopiedKey] = useState(false);
@@ -80,6 +84,7 @@ export function SubWalletPanel({ onOpenConfigModal }: SubWalletPanelProps) {
     const handleBalanceUpdate = (e: any) => {
       if (e?.detail?.balance !== undefined) {
         setSubBalance(e.detail.balance);
+        setSubWallet((prev) => (prev ? { ...prev, balance: e.detail.balance } : prev));
       }
     };
 
@@ -92,55 +97,62 @@ export function SubWalletPanel({ onOpenConfigModal }: SubWalletPanelProps) {
       window.removeEventListener("solana_copytrade_positions_updated", handlePositionsUpdate);
       window.removeEventListener("solana_subwallet_balance_updated", handleBalanceUpdate);
     };
-  }, [walletAddress]);
+  }, [walletAddress, network]);
 
   const loadSubBalance = async (pubKey: string) => {
     setIsRefreshing(true);
-    const bal = await fetchSubWalletBalance(pubKey, walletAddress || undefined);
-    setSubBalance(bal);
-    setIsRefreshing(false);
+    try {
+      const [bal, liveSol] = await Promise.all([
+        fetchSubWalletBalance(pubKey, walletAddress || undefined, network),
+        fetchLiveSolPrice(),
+      ]);
+      setSubBalance(bal);
+      if (liveSol > 0) setSolPriceUsd(liveSol);
+      setSubWallet((prev) => (prev ? { ...prev, balance: bal } : prev));
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
   const loadOrSeedPositions = (subPubKey: string) => {
     const saved = getSavedPositions();
     setPositions(saved);
-  };
 
-  const handleDepositSol = async (amount: number, isFaucet: boolean = false) => {
-    if (!subWallet) return;
-    setIsDepositing(true);
-    try {
-      const sig = await sendSolToSubWallet(subWallet.publicKey, amount, isFaucet);
-      if (sig) {
-        alert(`Successfully deposited ${amount} SOL into Sub-Wallet!\nTx: ${sig.slice(0, 10)}...`);
-        await loadSubBalance(subWallet.publicKey);
-        await refreshMainBalance();
-      }
-    } finally {
-      setIsDepositing(false);
+    // Cập nhật giá thị trường trực tiếp cho các vị thế đang mở
+    if (saved.length > 0) {
+      const mints = saved.map((p) => p.tokenMint).filter(Boolean);
+      fetchLiveTokenPrices(mints).then((priceMap) => {
+        if (priceMap && Object.keys(priceMap).length > 0) {
+          const updated = saved.map((pos) => {
+            const live = priceMap[pos.tokenMint];
+            if (live && live.priceUsd > 0) {
+              const pnl =
+                pos.entryPriceUsd > 0
+                  ? ((live.priceUsd - pos.entryPriceUsd) / pos.entryPriceUsd) * 100
+                  : pos.pnlPct;
+              return {
+                ...pos,
+                currentPriceUsd: live.priceUsd,
+                highestPriceUsd: Math.max(pos.highestPriceUsd || 0, live.priceUsd),
+                pnlPct: Number(pnl.toFixed(1)),
+              };
+            }
+            return pos;
+          });
+          setPositions(updated);
+          savePositions(updated);
+        }
+      });
     }
   };
 
-  const handleWithdrawAll = async () => {
-    if (!subWallet || !walletAddress) return;
-    if (subBalance <= 0.005) {
-      alert("Sub-Wallet balance is too low to withdraw (Requires > 0.005 SOL for network fees)");
-      return;
-    }
-    const confirmWithdraw = confirm(`Do you want to withdraw all ~${subBalance.toFixed(3)} SOL from the sub-wallet back to your main wallet (${walletAddress.slice(0, 6)}...)?`);
-    if (!confirmWithdraw) return;
+  const handleOpenDepositModal = (amount: number = 0.3) => {
+    setDepositAmountModal(amount);
+    setIsDepositOpen(true);
+  };
 
-    setIsWithdrawing(true);
-    const res = await withdrawSolFromSubWallet(subWallet, walletAddress);
-    setIsWithdrawing(false);
-
-    if (res.success) {
-      alert(`Withdrawal successful!\nSignature: ${res.signature?.slice(0, 10)}...`);
-      await loadSubBalance(subWallet.publicKey);
-      await refreshMainBalance();
-    } else {
-      alert(`Withdrawal failed: ${res.error}`);
-    }
+  const handleOpenWithdrawModal = () => {
+    setIsWithdrawOpen(true);
   };
 
   // Panic Sell button
@@ -283,7 +295,12 @@ export function SubWalletPanel({ onOpenConfigModal }: SubWalletPanelProps) {
 
             {/* Available SOL Balance */}
             <div className="mt-3 flex items-baseline justify-between">
-              <span className="text-xs text-zinc-400">Available balance:</span>
+              <div>
+                <span className="text-xs text-zinc-400">Available balance:</span>
+                <div className="text-[11px] text-zinc-400 font-mono mt-0.5">
+                  ≈ ${(subBalance * solPriceUsd).toFixed(2)} USD
+                </div>
+              </div>
               <div className="text-right">
                 <span className="text-xl font-bold font-mono text-emerald-400">
                   {subBalance.toFixed(3)}
@@ -296,10 +313,10 @@ export function SubWalletPanel({ onOpenConfigModal }: SubWalletPanelProps) {
           {/* Quick Deposit Buttons */}
           <div className="mt-3.5 space-y-2">
             <div className="flex justify-between items-center text-[11px]">
-              <label className="font-semibold text-zinc-300">Deposit from Main Wallet (Phantom):</label>
+              <label className="font-semibold text-zinc-300">Deposit from Main Wallet:</label>
               <button
                 type="button"
-                onClick={() => handleDepositSol(0.5, true)}
+                onClick={() => handleOpenDepositModal(0.5)}
                 className="text-emerald-400 hover:text-emerald-300 text-[10px] font-bold flex items-center gap-1 cursor-pointer"
               >
                 <Zap className="size-2.5" />
@@ -310,14 +327,20 @@ export function SubWalletPanel({ onOpenConfigModal }: SubWalletPanelProps) {
               {[0.1, 0.2, 0.5, 1.0].map((amt) => (
                 <button
                   key={amt}
-                  disabled={isDepositing}
-                  onClick={() => handleDepositSol(amt)}
-                  className="py-1.5 px-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold border border-zinc-700/60 transition-colors cursor-pointer text-center disabled:opacity-50"
+                  onClick={() => handleOpenDepositModal(amt)}
+                  className="py-1.5 px-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold border border-zinc-700/60 transition-colors cursor-pointer text-center"
                 >
                   +{amt}
                 </button>
               ))}
             </div>
+            <button
+              onClick={() => handleOpenDepositModal(0.3)}
+              className="w-full py-2 px-3 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5"
+            >
+              <Coins className="size-3.5" />
+              <span>Deposit SOL via Modal</span>
+            </button>
           </div>
         </div>
 
@@ -325,12 +348,12 @@ export function SubWalletPanel({ onOpenConfigModal }: SubWalletPanelProps) {
         <div className="pt-2 border-t border-zinc-800/80 space-y-2">
           <div className="flex gap-2">
             <button
-              onClick={handleWithdrawAll}
-              disabled={isWithdrawing || subBalance <= 0.005}
+              onClick={handleOpenWithdrawModal}
+              disabled={subBalance <= 0.005}
               className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold border border-zinc-700 transition-colors cursor-pointer disabled:opacity-50"
             >
               <ArrowDownRight className="size-3.5 text-blue-400" />
-              {isWithdrawing ? "Withdrawing..." : "Withdraw to Main"}
+              <span>Withdraw to Main</span>
             </button>
             <button
               onClick={() => setShowPrivateKey(!showPrivateKey)}
@@ -493,6 +516,26 @@ export function SubWalletPanel({ onOpenConfigModal }: SubWalletPanelProps) {
           </div>
         </div>
       </div>
+
+      {/* DEPOSIT MODAL */}
+      <DepositSubWalletModal
+        isOpen={isDepositOpen}
+        onClose={() => setIsDepositOpen(false)}
+        recommendedAmount={depositAmountModal}
+        targetDescription="Copy-Trading & Autonomous Execution"
+        onSuccess={(newBal) => {
+          if (subWallet) loadSubBalance(subWallet.publicKey);
+        }}
+      />
+
+      {/* WITHDRAW MODAL */}
+      <WithdrawSubWalletModal
+        isOpen={isWithdrawOpen}
+        onClose={() => setIsWithdrawOpen(false)}
+        onSuccess={(newBal) => {
+          if (subWallet) loadSubBalance(subWallet.publicKey);
+        }}
+      />
     </div>
   );
 }
