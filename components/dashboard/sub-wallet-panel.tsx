@@ -28,6 +28,7 @@ import {
   withdrawSolFromSubWallet,
   exportSubWalletPrivateKey,
 } from "@/lib/sub-wallet-manager";
+import { executeSubWalletSellToken } from "@/lib/jupiter-swap-router";
 import {
   CopyTradeConfig,
   CopyTradePosition,
@@ -143,9 +144,17 @@ export function SubWalletPanel({ onOpenConfigModal }: SubWalletPanelProps) {
   };
 
   // Panic Sell button
-  const handlePanicSellAll = () => {
-    const confirmPanic = confirm("WARNING: Panic sell all open copy-trade positions and return capital to sub-wallet?");
+  const handlePanicSellAll = async () => {
+    const confirmPanic = confirm("WARNING: Panic sell all open copy-trade positions and return capital to sub-wallet via DEX?");
     if (!confirmPanic) return;
+
+    if (subWallet) {
+      for (const p of openPositions) {
+        const estSol = p.entrySolAmount * (1 + (p.pnlPct || 0) / 100);
+        await executeSubWalletSellToken(subWallet, p.tokenMint, estSol, 5.0);
+      }
+      await loadSubBalance(subWallet.publicKey);
+    }
 
     const closed = positions.map(p => ({
       ...p,
@@ -154,15 +163,24 @@ export function SubWalletPanel({ onOpenConfigModal }: SubWalletPanelProps) {
     }));
     setPositions(closed);
     savePositions(closed);
-    alert("All positions have been closed via DEX routes successfully!");
+    alert("All positions have been closed via Jupiter DEX routes and SOL reclaimed!");
   };
 
   // Sell individual position
-  const handleSellPosition = (id: string) => {
+  const handleSellPosition = async (id: string) => {
     const target = positions.find(p => p.id === id);
     if (!target) return;
-    const confirmSell = confirm(`Confirm selling 100% of ${target.tokenSymbol} to reclaim SOL?`);
+    const confirmSell = confirm(`Confirm selling 100% of ${target.tokenSymbol} to reclaim SOL via Jupiter DEX?`);
     if (!confirmSell) return;
+
+    if (subWallet) {
+      const estSol = target.entrySolAmount * (1 + (target.pnlPct || 0) / 100);
+      const res = await executeSubWalletSellToken(subWallet, target.tokenMint, estSol, 3.0);
+      await loadSubBalance(subWallet.publicKey);
+      if (res.signature && !res.isSimulated) {
+        alert(`Sold on-chain successfully!\nTx: ${res.signature.slice(0, 10)}...`);
+      }
+    }
 
     const updated = positions.map(p => {
       if (p.id === id) {

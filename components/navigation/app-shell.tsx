@@ -26,7 +26,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [walletAddress]);
 
   return (
-    <div className="min-h-screen flex flex-col bg-zinc-950 text-white selection:bg-amber-500/30 selection:text-amber-200">
+    <div
+      suppressHydrationWarning
+      className="min-h-screen flex flex-col bg-zinc-950 text-white selection:bg-amber-500/30 selection:text-amber-200"
+    >
       {/* Global Navigation Bar */}
       <Navbar onOpenAgent={() => setIsAgentOpen(true)} />
 

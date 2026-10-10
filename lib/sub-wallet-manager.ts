@@ -1,4 +1,12 @@
-import { Keypair, Connection, PublicKey, LAMPORTS_PER_SOL, Transaction, SystemProgram } from "@solana/web3.js";
+import {
+  Keypair,
+  Connection,
+  PublicKey,
+  LAMPORTS_PER_SOL,
+  Transaction,
+  SystemProgram,
+  ComputeBudgetProgram,
+} from "@solana/web3.js";
 
 export interface SubWalletData {
   ownerAddress: string;
@@ -10,8 +18,15 @@ export interface SubWalletData {
 }
 
 const STORAGE_PREFIX = "solana_copytrade_subwallet_";
+
+// Ngưỡng tối thiểu rent-exempt cho System Account (~0.00089 SOL)
+export const MIN_RENT_EXEMPT_LAMPORTS = 890880;
+
 const FALLBACK_RPCS = [
-  process.env.NEXT_PUBLIC_SOLANA_RPC || "https://api.mainnet-beta.solana.com",
+  process.env.NEXT_PUBLIC_SOLANA_RPC ||
+    (process.env.HELIUS_API_KEY
+      ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`
+      : "https://api.mainnet-beta.solana.com"),
   "https://solana-rpc.publicnode.com",
   "https://rpc.ankr.com/solana",
 ];
@@ -23,7 +38,7 @@ const RPC_ENDPOINT = FALLBACK_RPCS[0];
 export function getSafeConnection(): Connection {
   return new Connection(RPC_ENDPOINT, {
     commitment: "confirmed",
-    confirmTransactionInitialTimeout: 30000,
+    confirmTransactionInitialTimeout: 45000,
   });
 }
 
@@ -89,40 +104,41 @@ export function getSubWallet(ownerAddress: string): SubWalletData | null {
 
 /**
  * Cập nhật số dư on-chain của Sub-Wallet kèm fallback bộ nhớ đệm
+ * Số dư on-chain từ RPC luôn là nguồn tin cậy tối thượng (Source of Truth)
  */
 export async function fetchSubWalletBalance(publicKeyStr: string, ownerAddress?: string): Promise<number> {
   if (!publicKeyStr) return 0;
 
-  // 1. Thử truy vấn on-chain
+  // 1. Truy vấn on-chain trực tiếp qua Solana RPC
   try {
     const conn = getSafeConnection();
     const pubKey = new PublicKey(publicKeyStr);
     const lamports = await conn.getBalance(pubKey);
     const sol = Number((lamports / LAMPORTS_PER_SOL).toFixed(4));
 
-    // Nếu có số dư on-chain thật, cập nhật cache
-    if (sol > 0 && ownerAddress && typeof window !== "undefined") {
+    // Cập nhật chính xác số dư thực tế vào cache bộ nhớ đệm
+    if (ownerAddress && typeof window !== "undefined") {
       const storageKey = `${STORAGE_PREFIX}${ownerAddress}`;
       const existing = localStorage.getItem(storageKey);
       if (existing) {
         try {
           const parsed = JSON.parse(existing);
-          parsed.balance = Math.max(parsed.balance || 0, sol);
+          parsed.balance = sol;
           localStorage.setItem(storageKey, JSON.stringify(parsed));
         } catch {
           // ignore
         }
       }
-      return sol;
     }
+    return sol;
   } catch (error) {
-    console.warn("Lỗi truy vấn số dư Sub-Wallet on-chain:", error);
+    console.warn("Lỗi truy vấn số dư Sub-Wallet on-chain (sử dụng cache fallback):", error);
   }
 
-  // 2. Fallback: Lấy số dư đã lưu trong local storage của sub-wallet
+  // 2. Fallback: Nếu RPC lỗi mạng hoặc rate limit, lấy số dư đã lưu trong local storage của sub-wallet
   if (typeof window !== "undefined" && ownerAddress) {
     const sw = getSubWallet(ownerAddress);
-    if (sw && typeof sw.balance === "number" && sw.balance > 0) {
+    if (sw && typeof sw.balance === "number") {
       return sw.balance;
     }
   }
@@ -199,6 +215,7 @@ export function depositSolSimulatedOrFaucet(ownerAddress: string, amountSol: num
 
 /**
  * Rút SOL từ Sub-Wallet về ví chính (Ký trực tiếp bằng Keypair của Sub-Wallet)
+ * Bảo vệ Rent-Exemption và áp dụng Compute Budget Priority Fee
  */
 export async function withdrawSolFromSubWallet(
   subWallet: SubWalletData,
@@ -217,8 +234,8 @@ export async function withdrawSolFromSubWallet(
       currentLamports = 0;
     }
 
-    // Nếu on-chain không có lamports nhưng có số dư bộ nhớ đệm (thử nghiệm/faucet)
-    if (currentLamports <= 5000) {
+    // Nếu on-chain không có lamports nhưng có số dư bộ nhớ đệm (thử nghiệm mô phỏng / faucet)
+    if (currentLamports <= 10000) {
       if (subWallet.balance && subWallet.balance > 0) {
         // Rút số dư mô phỏng / testnet
         const withdrawAmt = amountSol && amountSol > 0 ? Math.min(amountSol, subWallet.balance) : subWallet.balance;
@@ -228,41 +245,67 @@ export async function withdrawSolFromSubWallet(
           signature: `sim_withdraw_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
         };
       }
-      return { success: false, error: "Sub-wallet balance insufficient to cover network fee (minimum 0.005 SOL required)" };
+      return { success: false, error: "Số dư Sub-Wallet không đủ để trang trải phí mạng (cần tối thiểu 0.005 SOL)" };
     }
 
-    // Estimated transaction fee: 5000 lamports (~0.000005 SOL)
-    const feeReserveLamports = 5000;
+    // Dự trù chi phí mạng: Base fee (5,000 lamports) + Priority fee (~5,000 lamports) = 10,000 lamports (~0.00001 SOL)
+    const feeReserveLamports = 10000;
     let transferLamports = 0;
 
     if (!amountSol || amountSol <= 0) {
-      // Withdraw full balance
+      // 1. RÚT TOÀN BỘ: Cho phép tài khoản về 0 lamports hoàn toàn (Solana Runtime cho phép đóng account về 0)
       transferLamports = currentLamports - feeReserveLamports;
     } else {
-      transferLamports = Math.min(
-        Math.round(amountSol * LAMPORTS_PER_SOL),
-        currentLamports - feeReserveLamports
-      );
+      // 2. RÚT MỘT PHẦN: Phải đảm bảo số dư còn lại KHÔNG nằm trong vùng vi phạm Rent-Exemption (0 < còn lại < 890,880)
+      const requestedLamports = Math.round(amountSol * LAMPORTS_PER_SOL);
+      const remainingLamports = currentLamports - requestedLamports - feeReserveLamports;
+
+      if (remainingLamports < 0) {
+        // Không đủ số dư
+        transferLamports = currentLamports - feeReserveLamports;
+      } else if (remainingLamports > 0 && remainingLamports < MIN_RENT_EXEMPT_LAMPORTS) {
+        // Vi phạm rent-exemption: Tự động điều chỉnh để giữ lại tối thiểu ngưỡng rent-exempt
+        const safeTransfer = currentLamports - MIN_RENT_EXEMPT_LAMPORTS - feeReserveLamports;
+        if (safeTransfer > 0) {
+          transferLamports = safeTransfer;
+        } else {
+          // Nếu không đủ giữ rent thì chuyển thành rút toàn bộ
+          transferLamports = currentLamports - feeReserveLamports;
+        }
+      } else {
+        transferLamports = requestedLamports;
+      }
     }
 
     if (transferLamports <= 0) {
-      return { success: false, error: "Withdrawal amount is invalid or exceeds balance after network fee" };
+      return { success: false, error: "Số lượng rút không hợp lệ hoặc số dư không đủ sau khi trừ phí mạng" };
     }
 
     const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
     const transaction = new Transaction({
       feePayer: keypair.publicKey,
       recentBlockhash: blockhash,
-    }).add(
-      SystemProgram.transfer({
-        fromPubkey: keypair.publicKey,
-        toPubkey: toPubKey,
-        lamports: transferLamports,
-      })
-    );
+    })
+      // Thêm Priority Fee để đảm bảo xác nhận ngay lập tức kể cả khi mạng Solana nghẽn
+      .add(
+        ComputeBudgetProgram.setComputeUnitPrice({
+          microLamports: 100000, // 0.0001 SOL per 1M CU
+        })
+      )
+      .add(
+        SystemProgram.transfer({
+          fromPubkey: keypair.publicKey,
+          toPubkey: toPubKey,
+          lamports: transferLamports,
+        })
+      );
 
     transaction.sign(keypair);
-    const signature = await conn.sendRawTransaction(transaction.serialize());
+    const signature = await conn.sendRawTransaction(transaction.serialize(), {
+      skipPreflight: false,
+      preflightCommitment: "confirmed",
+      maxRetries: 3,
+    });
 
     try {
       await conn.confirmTransaction(
@@ -274,17 +317,17 @@ export async function withdrawSolFromSubWallet(
         "confirmed"
       );
     } catch (confirmErr) {
-      console.warn("Lưu ý xác nhận on-chain, transaction đã phát:", confirmErr);
+      console.warn("Lưu ý xác nhận on-chain, transaction đã phát lên mạng:", confirmErr);
     }
 
-    // Khấu trừ local cache
+    // Cập nhật lại số dư chính xác
     const withdrawnSol = transferLamports / LAMPORTS_PER_SOL;
     recordSubWalletDeduction(subWallet.ownerAddress, withdrawnSol);
 
     return { success: true, signature };
   } catch (error: any) {
-    console.error("Sub-wallet withdrawal error:", error);
-    return { success: false, error: error?.message || "Withdrawal transaction failed" };
+    console.error("Lỗi rút tiền Sub-wallet on-chain:", error);
+    return { success: false, error: error?.message || "Giao dịch rút tiền thất bại" };
   }
 }
 

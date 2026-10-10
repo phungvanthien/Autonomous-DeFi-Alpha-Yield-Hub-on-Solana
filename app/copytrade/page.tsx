@@ -6,6 +6,7 @@ import { CopyTradeConfigModal } from "@/components/dashboard/copytrade-config-mo
 import { DepositSubWalletModal } from "@/components/wallet/deposit-subwallet-modal";
 import { useSolanaWallet } from "@/components/wallet/wallet-context";
 import { getSubWallet, fetchSubWalletBalance, recordSubWalletDeduction } from "@/lib/sub-wallet-manager";
+import { executeSubWalletBuyToken, executeSubWalletSellToken } from "@/lib/jupiter-swap-router";
 import {
   CopyTradeConfig,
   CopyTradePosition,
@@ -90,10 +91,30 @@ export default function CopyTradePage() {
     setSelectedWhaleForConfig(whale);
   };
 
-  const handleConfigActivated = (config: CopyTradeConfig) => {
-    // Trừ số dư sub-wallet tương ứng với lệnh uỷ thác mở
+  const handleConfigActivated = async (config: CopyTradeConfig) => {
+    let txSig: string | undefined = undefined;
+    let solscanUrl: string | undefined = undefined;
+    let isLive: boolean = false;
+
+    // Thực thi lệnh Mua qua Jupiter Swap Router nếu có Sub-Wallet
     if (walletAddress && config.maxSolPerTrade > 0) {
-      recordSubWalletDeduction(walletAddress, config.maxSolPerTrade);
+      const sw = getSubWallet(walletAddress);
+      if (sw) {
+        const tokenMint = selectedWhaleForConfig?.specificTx?.tokenMint || "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        const swapRes = await executeSubWalletBuyToken(
+          sw,
+          tokenMint,
+          config.maxSolPerTrade,
+          config.slippagePct || 2.5
+        );
+        if (swapRes.success) {
+          txSig = swapRes.signature;
+          solscanUrl = swapRes.solscanUrl;
+          isLive = !swapRes.isSimulated;
+        }
+      } else {
+        recordSubWalletDeduction(walletAddress, config.maxSolPerTrade);
+      }
     }
 
     if (selectedWhaleForConfig?.specificTx) {
@@ -109,7 +130,7 @@ export default function CopyTradePage() {
         id: `pos_${Date.now()}`,
         whaleAddress: selectedWhaleForConfig.address,
         tokenSymbol: tx.tokenSymbol || "TOKEN",
-        tokenMint: tx.tokenMint || "So11111111111111111111111111111111111111112",
+        tokenMint: tx.tokenMint || "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
         entrySolAmount: config.maxSolPerTrade,
         entryPriceUsd: entryPrice,
         currentPriceUsd: currentPrice,
@@ -118,23 +139,38 @@ export default function CopyTradePage() {
         entryTime: Date.now(),
         status: "OPEN",
         dex: tx.platform || "Raydium V4",
+        txSignature: txSig,
+        solscanUrl: solscanUrl,
+        isLiveOnChain: isLive,
       };
       savePositions([newPos, ...currentPositions]);
       setPositions([newPos, ...currentPositions]);
     }
 
+    refreshBalance();
+
+    const modeText = isLive ? "LIVE ON-CHAIN ⚡" : "SIMULATED";
     setToastNotification(
-      `Copy-trading activated for whale ${config.targetWhaleAddress.slice(0, 6)}... (Size: ${config.maxSolPerTrade} SOL, Stop-Loss: -${config.hardStopLossPct}%, TP1: +${config.tp1Pct}%)`
+      `[${modeText}] Copy-trading activated for whale ${config.targetWhaleAddress.slice(0, 6)}... (Size: ${config.maxSolPerTrade} SOL, Stop-Loss: -${config.hardStopLossPct}%, TP1: +${config.tp1Pct}%)`
     );
     setTimeout(() => setToastNotification(null), 5000);
     setSelectedWhaleForConfig(null);
   };
 
-  const handleSellPosition = (id: string) => {
+  const handleSellPosition = async (id: string) => {
     const target = positions.find((p) => p.id === id);
     if (!target) return;
-    const confirmSell = confirm(`Confirm selling all ${target.tokenSymbol} tokens to reclaim SOL?`);
+    const confirmSell = confirm(`Confirm selling all ${target.tokenSymbol} tokens to reclaim SOL via Jupiter Router?`);
     if (!confirmSell) return;
+
+    if (walletAddress) {
+      const sw = getSubWallet(walletAddress);
+      if (sw) {
+        const estSol = target.entrySolAmount * (1 + (target.pnlPct || 0) / 100);
+        await executeSubWalletSellToken(sw, target.tokenMint, estSol, 3.0);
+        refreshBalance();
+      }
+    }
 
     const updated = positions.map((p) => {
       if (p.id === id) {
@@ -150,11 +186,22 @@ export default function CopyTradePage() {
     savePositions(updated);
   };
 
-  const handlePanicSellAll = () => {
+  const handlePanicSellAll = async () => {
     const confirmPanic = confirm(
-      "WARNING: Emergency sell all open copy-trade positions and withdraw SOL back to Sub-Wallet?"
+      "WARNING: Emergency sell all open copy-trade positions and withdraw SOL back to Sub-Wallet via DEX?"
     );
     if (!confirmPanic) return;
+
+    if (walletAddress) {
+      const sw = getSubWallet(walletAddress);
+      if (sw) {
+        for (const p of openPositions) {
+          const estSol = p.entrySolAmount * (1 + (p.pnlPct || 0) / 100);
+          await executeSubWalletSellToken(sw, p.tokenMint, estSol, 5.0);
+        }
+        refreshBalance();
+      }
+    }
 
     const closed = positions.map((p) => ({
       ...p,
@@ -168,7 +215,10 @@ export default function CopyTradePage() {
   const openPositions = positions.filter((p) => p.status === "OPEN" || p.status === "TP1_TAKEN");
 
   return (
-    <div className="max-w-7xl mx-auto px-3 sm:px-5 lg:px-8 pt-6 pb-28 sm:pb-32 space-y-6">
+    <div
+      suppressHydrationWarning
+      className="max-w-7xl mx-auto px-3 sm:px-5 lg:px-8 pt-6 pb-28 sm:pb-32 space-y-6"
+    >
       {/* Toast Notification */}
       {toastNotification && (
         <div className="fixed top-20 right-4 sm:right-6 z-50 max-w-[calc(100vw-2rem)] sm:max-w-md p-4 rounded-xl bg-amber-500 text-black font-bold text-xs shadow-2xl flex items-center gap-2 border border-amber-300">
@@ -248,7 +298,27 @@ export default function CopyTradePage() {
               <tbody className="divide-y divide-zinc-800/60 font-mono">
                 {openPositions.map((pos) => (
                   <tr key={pos.id} className="hover:bg-zinc-800/30">
-                    <td className="py-2.5 font-bold text-white">{pos.tokenSymbol}</td>
+                    <td className="py-2.5 font-bold text-white">
+                      <div className="flex items-center gap-1.5">
+                        <span>{pos.tokenSymbol}</span>
+                        {pos.isLiveOnChain && (
+                          <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] font-mono">
+                            LIVE
+                          </span>
+                        )}
+                        {pos.solscanUrl && (
+                          <a
+                            href={pos.solscanUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-zinc-500 hover:text-amber-400 transition-colors"
+                            title="Xem giao dịch on-chain trên Solscan"
+                          >
+                            <ExternalLink className="size-3" />
+                          </a>
+                        )}
+                      </div>
+                    </td>
                     <td className="py-2.5 text-zinc-400">{pos.dex}</td>
                     <td className="py-2.5 text-zinc-300">{formatSol(pos.entrySolAmount)}</td>
                     <td className="py-2.5 text-zinc-400">{formatCurrency(pos.entryPriceUsd, { minimumFractionDigits: 4, maximumFractionDigits: 4 })}</td>

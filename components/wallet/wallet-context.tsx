@@ -1,7 +1,7 @@
 "use client";
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
-import { Connection, PublicKey, LAMPORTS_PER_SOL, Transaction, SystemProgram } from "@solana/web3.js";
+import { Connection, PublicKey, LAMPORTS_PER_SOL, Transaction, SystemProgram, ComputeBudgetProgram } from "@solana/web3.js";
 import { getSafeConnection, recordSubWalletDeposit } from "@/lib/sub-wallet-manager";
 
 interface SolanaWalletProviderValue {
@@ -223,13 +223,19 @@ export function SolanaWalletProvider({ children }: { children: React.ReactNode }
       const transaction = new Transaction({
         feePayer: fromPubkey,
         recentBlockhash: blockhash,
-      }).add(
-        SystemProgram.transfer({
-          fromPubkey,
-          toPubkey,
-          lamports,
-        })
-      );
+      })
+        .add(
+          ComputeBudgetProgram.setComputeUnitPrice({
+            microLamports: 100000,
+          })
+        )
+        .add(
+          SystemProgram.transfer({
+            fromPubkey,
+            toPubkey,
+            lamports,
+          })
+        );
 
       // Sign and send transaction via extension
       let signature = "";

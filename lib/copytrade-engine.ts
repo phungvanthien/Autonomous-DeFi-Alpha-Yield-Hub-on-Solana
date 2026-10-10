@@ -48,6 +48,9 @@ export interface CopyTradePosition {
   closeReason?: string;
   poolLiquidityUsd?: number;
   dex: string;
+  txSignature?: string;
+  solscanUrl?: string;
+  isLiveOnChain?: boolean;
 }
 
 export interface AntiRugCheckResult {
